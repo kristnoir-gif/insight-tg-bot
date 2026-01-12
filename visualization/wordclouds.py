@@ -3,11 +3,13 @@
 """
 import re
 import logging
-from typing import Literal
+from typing import Literal, Callable
+import random
 
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 from wordcloud import WordCloud
 
 from config import (
@@ -23,6 +25,26 @@ from config import (
 logger = logging.getLogger(__name__)
 
 SentimentType = Literal['positive', 'aggressive']
+
+# Минимальная яркость цвета (0.0-1.0), чтобы избежать слишком светлых слов
+MIN_COLOR_INTENSITY = 0.3
+
+
+def _make_color_func(colormap_name: str) -> Callable:
+    """
+    Создаёт функцию окраски слов с ограничением яркости.
+    Использует только тёмную часть colormap (от MIN_COLOR_INTENSITY до 1.0).
+    """
+    cmap = cm.get_cmap(colormap_name)
+
+    def color_func(word, font_size, position, orientation, random_state=None, **kwargs):
+        # Используем диапазон от MIN_COLOR_INTENSITY до 1.0
+        intensity = random.uniform(MIN_COLOR_INTENSITY, 1.0)
+        rgba = cmap(intensity)
+        # Конвертируем в RGB строку
+        return f"rgb({int(rgba[0]*255)}, {int(rgba[1]*255)}, {int(rgba[2]*255)})"
+
+    return color_func
 
 
 def _clean_title(title: str) -> str:
@@ -54,11 +76,14 @@ def _create_cloud(
         return None
 
     try:
+        # Используем кастомную функцию окраски для избежания светлых цветов
+        color_func = _make_color_func(colormap)
+
         wc = WordCloud(
             width=CLOUD_WIDTH,
             height=CLOUD_HEIGHT,
             background_color='white',
-            colormap=colormap,
+            color_func=color_func,
             max_words=max_words,
             min_font_size=10,
             prefer_horizontal=True,

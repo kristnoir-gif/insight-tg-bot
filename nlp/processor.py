@@ -8,7 +8,11 @@ from typing import Literal
 from enum import Enum
 
 import emoji
-import pymorphy2
+
+try:
+    import pymorphy3 as pymorphy
+except ImportError:
+    import pymorphy2 as pymorphy
 
 from nlp.constants import (
     russian_stopwords,
@@ -19,7 +23,7 @@ from nlp.constants import (
 logger = logging.getLogger(__name__)
 
 # Инициализация морфологического анализатора
-morph = pymorphy2.MorphAnalyzer()
+morph = pymorphy.MorphAnalyzer()
 
 ProcessingMode = Literal['normal', 'mats', 'person']
 

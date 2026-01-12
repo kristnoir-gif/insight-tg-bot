@@ -163,5 +163,5 @@ def generate_mats_cloud(username: str, words: list[str], title: str) -> str | No
         words=words,
         path=path,
         title_text=f"Облако мата канала: {clean_title}",
-        colormap='autumn',
+        colormap='Reds',
     )

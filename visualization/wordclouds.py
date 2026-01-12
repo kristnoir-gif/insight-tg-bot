@@ -95,8 +95,8 @@ def _create_cloud(
         ax.axis("off")
 
         fig.text(
-            0.5, 0.95, title_text,
-            fontsize=24, fontweight='bold', ha='center', color='#1a1a1a'
+            0.5, 0.94, title_text,
+            fontsize=22, fontweight='bold', ha='center', va='center', color='#2d3436'
         )
         fig.text(
             0.5, 0.03, WATERMARK_TEXT,

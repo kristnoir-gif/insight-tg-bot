@@ -272,8 +272,8 @@ def generate_names_chart(
 
         clean_title = _clean_title(title)
         fig.text(
-            0.5, 0.96, f"Топ упомянутых людей и личностей\n{clean_title}",
-            fontsize=22, fontweight='bold', ha='center', color='#1f2937'
+            0.5, 0.96, f"Топ упомянутых людей и личностей: {clean_title}",
+            fontsize=22, fontweight='bold', ha='center', va='center', color='#2d3436'
         )
 
         for bar in bars:

@@ -30,7 +30,7 @@ async def cmd_start(message: types.Message) -> None:
     """Обработчик команды /start."""
     logger.info(f"Пользователь {message.from_user.id} запустил бота")
     await message.answer(
-        "Пришли мне юзернейм канала (например: `polozhnyak`), "
+        "📊 Пришли мне юзернейм канала (например: `polozhnyak`),"
         "и я выверну его смыслы наизнанку!"
     )
 
@@ -49,22 +49,24 @@ async def handle_msg(message: types.Message) -> None:
     username = message.text.replace('@', '').split('/')[-1].strip()
     logger.info(f"Запрос анализа канала: {username} от пользователя {message.from_user.id}")
 
-    status = await message.answer("Извлекаю смыслы... Подождите минутку")
+    status = await message.answer("🛸 Извлекаю смыслы... Подождите минутку")
 
     try:
         result = await analyze_channel(_user_client, username)
 
         if result is None or result.cloud_path is None:
-            await message.answer("Ошибка или канал пуст.")
+            await message.answer("❌ Ошибка или канал пуст.")
             await status.delete()
             return
 
         # Формируем caption со статистикой
         caption = (
-            f"Канал: {result.title}\n\n"
-            f"Количество уникальных слов: {result.stats.unique_count}\n"
-            f"Средняя длина поста: {result.stats.avg_len} слов\n"
-            f"Индекс крика: {result.stats.scream_index}"
+            f"📊 Канал: {result.title}\n\n"
+            f"📚 Уникальных слов: {result.stats.unique_count}\n"
+            f"📏 Средняя длина поста: {result.stats.avg_len} слов\n"
+            f"🗣️ Индекс крика: {result.stats.scream_index}\n"
+            f"👤 Упомянуто личностей: {result.stats.unique_names_count} "
+            f"({result.stats.total_names_mentions} упоминаний)"
         )
 
         # Собираем медиагруппу
@@ -91,7 +93,7 @@ async def handle_msg(message: types.Message) -> None:
 
         # Отдельное сообщение с эмодзи
         if result.top_emojis:
-            emoji_text = f"Топ-20 эмодзи канала {result.title}\n\n"
+            emoji_text = f"🔥 Топ-20 эмодзи канала {result.title}\n\n"
             for emo, count in result.top_emojis:
                 emoji_text += f"{emo} x {count}\n"
             await message.answer(emoji_text)
@@ -108,7 +110,7 @@ async def handle_msg(message: types.Message) -> None:
 
     except AnalysisError as e:
         logger.error(f"Ошибка анализа: {e}")
-        await message.answer(f"Ошибка анализа канала: {e}")
+        await message.answer(f"❌ Ошибка анализа канала: {e}")
 
     except Exception as e:
         logger.exception(f"Неожиданная ошибка при анализе канала {username}")

@@ -234,18 +234,22 @@ def generate_names_chart(
     username: str,
     top_names: list[tuple[str, int]],
     title: str,
+    total_unique_names: int = 0,
+    total_mentions: int = 0,
     min_mentions: int = 2,
     max_entries: int = 30
 ) -> str | None:
     """
-    Генерирует график топ упомянутых людей.
+    Генерирует график топ упомянутых личностей (писатели, деятели культуры и т.д.).
 
     Args:
         username: Имя пользователя/канала.
         top_names: Список кортежей (имя, количество).
         title: Название канала.
-        min_mentions: Минимальное количество упоминаний.
-        max_entries: Максимальное количество записей.
+        total_unique_names: Общее количество уникальных имён.
+        total_mentions: Общее количество упоминаний.
+        min_mentions: Минимальное количество упоминаний для отображения.
+        max_entries: Максимальное количество записей на графике.
 
     Returns:
         Путь к файлу или None.
@@ -263,32 +267,51 @@ def generate_names_chart(
         labels = [x[0] for x in filtered][::-1]
         counts = [x[1] for x in filtered][::-1]
 
+        # Динамическая высота в зависимости от количества имён
+        fig_height = max(8, min(14, len(labels) * 0.4 + 2))
         path = f"names_{username}.png"
-        fig, ax = plt.subplots(figsize=(14, 12), facecolor=BACKGROUND_COLOR)
+        fig, ax = plt.subplots(figsize=(14, fig_height), facecolor=BACKGROUND_COLOR)
         ax.set_facecolor(BACKGROUND_COLOR)
 
-        colors = cm.viridis(np.linspace(0, 1, len(labels)))
-        bars = ax.barh(labels, counts, color=colors, height=0.7, edgecolor='gray', linewidth=0.5)
+        # Градиент от тёплых к холодным цветам
+        colors = cm.plasma(np.linspace(0.15, 0.85, len(labels)))
+        bars = ax.barh(labels, counts, color=colors, height=0.7, edgecolor='white', linewidth=0.8)
 
         clean_title = _clean_title(title)
+
+        # Заголовок
         fig.text(
-            0.5, 0.96, f"Топ упомянутых людей и личностей: {clean_title}",
-            fontsize=22, fontweight='bold', ha='center', va='center', color='#2d3436'
+            0.5, 0.97, f"Топ упомянутых личностей • {clean_title}",
+            fontsize=20, fontweight='bold', ha='center', va='center', color='#2d3436'
         )
 
+        # Подзаголовок со статистикой
+        if total_unique_names > 0:
+            subtitle = f"Уникальных имён: {total_unique_names}"
+            if total_mentions > 0:
+                subtitle += f" • Всего упоминаний: {total_mentions}"
+            fig.text(
+                0.5, 0.935, subtitle,
+                fontsize=12, ha='center', va='center', color='#636e72', style='italic'
+            )
+
+        # Подписи значений на барах
         for bar in bars:
             width = bar.get_width()
             ax.text(
-                width + max(counts) * 0.01, bar.get_y() + bar.get_height() / 2,
-                f'{int(width)}', va='center', fontsize=10, fontweight='bold', color='#111827'
+                width + max(counts) * 0.015, bar.get_y() + bar.get_height() / 2,
+                f'{int(width)}', va='center', fontsize=11, fontweight='bold', color='#2d3436'
             )
 
-        ax.set_xlim(0, max(counts) * 1.15 if counts else 10)
-        ax.tick_params(axis='y', labelsize=9)
+        ax.set_xlim(0, max(counts) * 1.12 if counts else 10)
+        ax.set_xlabel('Количество упоминаний', fontsize=11, labelpad=10, color='#2d3436')
+        ax.tick_params(axis='y', labelsize=10)
+        ax.tick_params(axis='x', labelsize=9)
+        ax.grid(axis='x', linestyle='--', alpha=0.3, color='gray')
         _style_axes(ax)
         _add_watermark(fig)
 
-        plt.tight_layout(rect=[0.02, 0.06, 0.98, 0.92])
+        plt.tight_layout(rect=[0.02, 0.06, 0.98, 0.90])
         plt.savefig(path, dpi=160, bbox_inches='tight', facecolor=fig.get_facecolor())
         plt.close(fig)
 

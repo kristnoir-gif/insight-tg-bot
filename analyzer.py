@@ -41,6 +41,8 @@ class ChannelStats:
     unique_count: int = 0
     avg_len: float = 0.0
     scream_index: float = 0.0
+    unique_names_count: int = 0
+    total_names_mentions: int = 0
 
 
 @dataclass
@@ -173,9 +175,16 @@ async def analyze_channel(
         hour_counts = Counter((date.astimezone(MOSCOW_TZ)).hour for date, _ in posts)
         hour_path = generate_hour_chart(username, dict(hour_counts), title)
 
-        # Имена
-        top_names = Counter(names).most_common(100)
-        names_path = generate_names_chart(username, top_names, title)
+        # Имена и личности
+        names_counter = Counter(names)
+        unique_names_count = len(names_counter)
+        total_names_mentions = len(names)
+        top_names = names_counter.most_common(100)
+        names_path = generate_names_chart(
+            username, top_names, title,
+            total_unique_names=unique_names_count,
+            total_mentions=total_names_mentions
+        )
 
         # Фразы (триграммы)
         all_tokens: list[str] = []
@@ -198,6 +207,8 @@ async def analyze_channel(
             unique_count=len(set(all_words)),
             avg_len=round(np.mean([len(p[1].split()) for p in posts]), 1),
             scream_index=scream_index,
+            unique_names_count=unique_names_count,
+            total_names_mentions=total_names_mentions,
         )
 
         logger.info(f"Анализ канала {username} завершён успешно")

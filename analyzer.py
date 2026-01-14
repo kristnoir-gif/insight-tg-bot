@@ -77,7 +77,7 @@ class AnalysisResult:
 
 async def analyze_channel(
     client: TelegramClient,
-    username: str,
+    channel: str | int,
     limit: int = DEFAULT_MESSAGE_LIMIT
 ) -> AnalysisResult | None:
     """
@@ -85,7 +85,7 @@ async def analyze_channel(
 
     Args:
         client: Подключённый TelegramClient.
-        username: Имя пользователя/канала.
+        channel: Username канала (str) или chat_id (int).
         limit: Максимальное количество сообщений для анализа.
 
     Returns:
@@ -98,20 +98,23 @@ async def analyze_channel(
         if not client.is_connected():
             await client.connect()
 
-        logger.info(f"Начат анализ канала: {username}")
+        logger.info(f"Начат анализ канала: {channel}")
 
-        # Получение данных канала
-        entity = await client.get_entity(username)
+        # Получение данных канала (Telethon поддерживает и username, и chat_id)
+        entity = await client.get_entity(channel)
         title = entity.title
+
+        # Используем username или id для имён файлов
+        channel_id = getattr(entity, 'username', None) or str(entity.id)
 
         messages = [m async for m in client.iter_messages(entity, limit=limit) if m.text]
         posts: list[tuple[datetime, str]] = [(m.date, m.text) for m in messages]
 
         if not posts:
-            logger.warning(f"Канал {username} пуст или нет текстовых сообщений")
+            logger.warning(f"Канал {channel} пуст или нет текстовых сообщений")
             return AnalysisResult(title=title)
 
-        logger.info(f"Получено {len(posts)} сообщений из канала {username}")
+        logger.info(f"Получено {len(posts)} сообщений из канала {channel}")
 
         # Извлечение слов
         all_words: list[str] = []
@@ -143,14 +146,14 @@ async def analyze_channel(
                     excl_counts.append(text.count('!') / word_count)
 
         if not all_words:
-            logger.warning(f"Не удалось извлечь слова из канала {username}")
+            logger.warning(f"Не удалось извлечь слова из канала {channel}")
             return AnalysisResult(title=title)
 
         # Диагностика периода
         oldest = min(d for d, _ in posts)
         newest = max(d for d, _ in posts)
         logger.info(
-            f"Канал: {username} | Постов: {len(posts)} | "
+            f"Канал: {channel_id} | Постов: {len(posts)} | "
             f"Период: {oldest.astimezone(MOSCOW_TZ).strftime('%Y-%m-%d')} – "
             f"{newest.astimezone(MOSCOW_TZ).strftime('%Y-%m-%d')}"
         )
@@ -158,22 +161,22 @@ async def analyze_channel(
         # Создание визуализаций
         word_counter = Counter(all_words)
 
-        cloud_path = generate_main_cloud(username, all_words, title)
-        graph_path = generate_top_words_chart(username, word_counter, title)
-        mats_path = generate_mats_cloud(username, mat_words, title)
-        pos_path = generate_sentiment_cloud(username, pos_words, title, 'positive')
-        agg_path = generate_sentiment_cloud(username, agg_words, title, 'aggressive')
+        cloud_path = generate_main_cloud(channel_id, all_words, title)
+        graph_path = generate_top_words_chart(channel_id, word_counter, title)
+        mats_path = generate_mats_cloud(channel_id, mat_words, title)
+        pos_path = generate_sentiment_cloud(channel_id, pos_words, title, 'positive')
+        agg_path = generate_sentiment_cloud(channel_id, agg_words, title, 'aggressive')
 
         # Статистика по дням недели
         weekday_lens: dict[int, list[int]] = {i: [] for i in range(7)}
         for date, text in posts:
             weekday_lens[date.astimezone(MOSCOW_TZ).weekday()].append(len(text.split()))
         avg_lens = {wd: np.mean(lens) if lens else 0 for wd, lens in weekday_lens.items()}
-        weekday_path = generate_weekday_chart(username, avg_lens, title)
+        weekday_path = generate_weekday_chart(channel_id, avg_lens, title)
 
         # Статистика по часам
         hour_counts = Counter((date.astimezone(MOSCOW_TZ)).hour for date, _ in posts)
-        hour_path = generate_hour_chart(username, dict(hour_counts), title)
+        hour_path = generate_hour_chart(channel_id, dict(hour_counts), title)
 
         # Имена и личности
         names_counter = Counter(names)
@@ -181,7 +184,7 @@ async def analyze_channel(
         total_names_mentions = len(names)
         top_names = names_counter.most_common(100)
         names_path = generate_names_chart(
-            username, top_names, title,
+            channel_id, top_names, title,
             total_unique_names=unique_names_count,
             total_mentions=total_names_mentions
         )
@@ -192,7 +195,7 @@ async def analyze_channel(
             all_tokens.extend(re.findall(r'\b\w+\b', text.lower()))
         trigrams_list = list(ngrams(all_tokens, 3))
         top_trigrams = Counter(trigrams_list).most_common(10)
-        phrases_path = generate_phrases_chart(username, top_trigrams, title)
+        phrases_path = generate_phrases_chart(channel_id, top_trigrams, title)
 
         # Эмодзи
         emoji_freq = Counter(all_emojis)
@@ -211,7 +214,7 @@ async def analyze_channel(
             total_names_mentions=total_names_mentions,
         )
 
-        logger.info(f"Анализ канала {username} завершён успешно")
+        logger.info(f"Анализ канала {channel_id} завершён успешно")
 
         return AnalysisResult(
             title=title,
@@ -229,5 +232,5 @@ async def analyze_channel(
         )
 
     except Exception as e:
-        logger.error(f"Ошибка анализа канала {username}: {e}")
+        logger.error(f"Ошибка анализа канала {channel}: {e}")
         raise AnalysisError(f"Не удалось проанализировать канал: {e}") from e

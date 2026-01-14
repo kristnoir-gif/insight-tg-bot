@@ -6,10 +6,18 @@ import logging
 
 from aiogram import Router, types, F
 from aiogram.filters import Command
-from aiogram.types import FSInputFile, InputMediaPhoto
+from aiogram.types import (
+    FSInputFile,
+    InputMediaPhoto,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    KeyboardButtonRequestChat,
+    ChatShared,
+)
 from telethon import TelegramClient
 
 from analyzer import analyze_channel, AnalysisError
+from db import register_user, log_request, get_stats, is_admin
 
 logger = logging.getLogger(__name__)
 
@@ -25,14 +33,94 @@ def set_user_client(client: TelegramClient) -> None:
     _user_client = client
 
 
+def _get_channel_keyboard() -> ReplyKeyboardMarkup:
+    """Создаёт клавиатуру с кнопкой выбора канала."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(
+                    text="📊 Выбрать канал для анализа",
+                    request_chat=KeyboardButtonRequestChat(
+                        request_id=1,
+                        chat_is_channel=True,
+                        user_administrator_rights=None,
+                        bot_administrator_rights=None,
+                    ),
+                )
+            ]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
 @router.message(Command("start"))
 async def cmd_start(message: types.Message) -> None:
     """Обработчик команды /start."""
-    logger.info(f"Пользователь {message.from_user.id} запустил бота")
+    user = message.from_user
+    logger.info(f"Пользователь {user.id} запустил бота")
+
+    # Регистрируем пользователя в БД
+    register_user(user.id, user.username)
+
     await message.answer(
-        "📊 Пришли мне юзернейм канала (например: `polozhnyak`),"
-        "и я выверну его смыслы наизнанку!"
+        "📊 *Добро пожаловать в Insight Bot!*\n\n"
+        "Я анализирую публичные Telegram-каналы и выворачиваю их смыслы наизнанку.\n\n"
+        "🔹 Нажми кнопку ниже, чтобы выбрать канал\n"
+        "🔹 Или просто отправь юзернейм (например: `polozhnyak`)",
+        parse_mode="Markdown",
+        reply_markup=_get_channel_keyboard(),
     )
+
+
+@router.message(Command("admin"))
+async def cmd_admin(message: types.Message) -> None:
+    """Обработчик команды /admin — статистика для администратора."""
+    user = message.from_user
+
+    if not is_admin(user.id):
+        logger.warning(f"Попытка доступа к /admin от пользователя {user.id}")
+        await message.answer("⛔ Доступ запрещён.")
+        return
+
+    stats = get_stats()
+
+    # Формируем топ пользователей
+    top_text = ""
+    if stats["top_users"]:
+        top_text = "\n\n👑 *Топ-5 пользователей:*\n"
+        for i, (uid, uname, count) in enumerate(stats["top_users"], 1):
+            name = f"@{uname}" if uname else f"ID:{uid}"
+            top_text += f"{i}. {name} — {count} запросов\n"
+
+    await message.answer(
+        f"📈 *Статистика бота*\n\n"
+        f"👥 Всего пользователей: {stats['total_users']}\n"
+        f"✅ Активных пользователей: {stats['active_users']}\n"
+        f"📊 Всего анализов: {stats['total_requests']}"
+        f"{top_text}",
+        parse_mode="Markdown",
+    )
+
+
+@router.message(F.chat_shared)
+async def handle_chat_shared(message: types.Message) -> None:
+    """Обработчик выбора канала через кнопку."""
+    chat_shared: ChatShared = message.chat_shared
+
+    if chat_shared.request_id != 1:
+        return
+
+    chat_id = chat_shared.chat_id
+    user = message.from_user
+
+    logger.info(f"Пользователь {user.id} выбрал канал через кнопку: {chat_id}")
+
+    # Регистрируем пользователя
+    register_user(user.id, user.username)
+
+    # Выполняем анализ
+    await _perform_analysis(message, chat_id)
 
 
 @router.message(F.text)
@@ -41,23 +129,51 @@ async def handle_msg(message: types.Message) -> None:
     if message.text.startswith('/'):
         return
 
+    user = message.from_user
+
+    # Регистрируем пользователя
+    register_user(user.id, user.username)
+
+    # Извлекаем username из текста
+    username = message.text.replace('@', '').split('/')[-1].strip()
+
+    if not username:
+        await message.answer("❌ Пожалуйста, укажите юзернейм канала.")
+        return
+
+    logger.info(f"Запрос анализа канала: {username} от пользователя {user.id}")
+
+    # Выполняем анализ
+    await _perform_analysis(message, username)
+
+
+async def _perform_analysis(message: types.Message, channel: str | int) -> None:
+    """
+    Выполняет анализ канала и отправляет результаты.
+
+    Args:
+        message: Сообщение пользователя.
+        channel: Username канала (str) или chat_id (int).
+    """
     if _user_client is None:
-        await message.answer("Бот не готов к работе. Попробуйте позже.")
+        await message.answer("❌ Бот не готов к работе. Попробуйте позже.")
         logger.error("Telegram-клиент не инициализирован")
         return
 
-    username = message.text.replace('@', '').split('/')[-1].strip()
-    logger.info(f"Запрос анализа канала: {username} от пользователя {message.from_user.id}")
-
+    user = message.from_user
     status = await message.answer("🛸 Извлекаю смыслы... Подождите минутку")
 
     try:
-        result = await analyze_channel(_user_client, username)
+        # Telethon поддерживает как username (str), так и chat_id (int)
+        result = await analyze_channel(_user_client, channel)
 
         if result is None or result.cloud_path is None:
             await message.answer("❌ Ошибка или канал пуст.")
             await status.delete()
             return
+
+        # Логируем успешный запрос
+        log_request(user.id)
 
         # Формируем caption со статистикой
         caption = (
@@ -98,7 +214,7 @@ async def handle_msg(message: types.Message) -> None:
                 emoji_text += f"{emo} x {count}\n"
             await message.answer(emoji_text)
 
-        logger.info(f"Анализ канала {username} успешно отправлен пользователю {message.from_user.id}")
+        logger.info(f"Анализ канала {channel} успешно отправлен пользователю {user.id}")
 
         # Удаление временных файлов
         for path in result.get_all_paths():
@@ -113,8 +229,8 @@ async def handle_msg(message: types.Message) -> None:
         await message.answer(f"❌ Ошибка анализа канала: {e}")
 
     except Exception as e:
-        logger.exception(f"Неожиданная ошибка при анализе канала {username}")
-        await message.answer("Произошла ошибка. Попробуйте позже.")
+        logger.exception(f"Неожиданная ошибка при анализе канала {channel}")
+        await message.answer("❌ Произошла ошибка. Попробуйте позже.")
 
     finally:
         try:

@@ -19,6 +19,7 @@ from config import (
     validate_config,
 )
 from handlers import router, set_user_client
+from db import init_db
 
 
 def setup_logging() -> None:
@@ -40,6 +41,9 @@ async def main() -> None:
     if not validate_config():
         logger.error("Конфигурация невалидна. Проверьте .env файл.")
         sys.exit(1)
+
+    # Инициализация базы данных
+    init_db()
 
     # Инициализация клиентов
     bot = Bot(token=BOT_TOKEN)

@@ -17,6 +17,9 @@ env/
 # Generated images
 *.png
 
+# Database
+users.db
+
 # IDE
 .idea/
 .vscode/

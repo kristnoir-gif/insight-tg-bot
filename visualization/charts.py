@@ -16,9 +16,21 @@ from config import DPI, BACKGROUND_COLOR, WATERMARK_TEXT, WATERMARK_COLOR
 logger = logging.getLogger(__name__)
 
 
-def _clean_title(title: str) -> str:
-    """Очищает название канала от спецсимволов."""
-    return re.sub(r'[^\w\s-]', '', title).strip()
+def _clean_title(title: str, max_length: int = 30) -> str:
+    """
+    Очищает название канала от спецсимволов и обрезает длинные названия.
+
+    Args:
+        title: Название канала.
+        max_length: Максимальная длина (по умолчанию 30 символов).
+
+    Returns:
+        Очищенное и обрезанное название.
+    """
+    cleaned = re.sub(r'[^\w\s-]', '', title).strip()
+    if len(cleaned) > max_length:
+        return cleaned[:max_length].rstrip() + '...'
+    return cleaned
 
 
 def _setup_figure(figsize: tuple[int, int] = (12, 7)) -> tuple[plt.Figure, plt.Axes]:
@@ -75,9 +87,9 @@ def generate_top_words_chart(
         bars = ax.barh(labels, counts, color=colors, edgecolor='white', linewidth=1)
 
         clean_title = _clean_title(title)
-        fig.text(
-            0.5, 0.94, f"Топ-{top_n} ключевых слов канала {clean_title}",
-            fontsize=22, fontweight='bold', ha='center', va='center', color='#2d3436'
+        fig.suptitle(
+            f"Топ-{top_n} ключевых слов канала {clean_title}",
+            fontsize=20, fontweight='bold', color='#2d3436', y=0.96
         )
 
         for bar in bars:
@@ -87,10 +99,11 @@ def generate_top_words_chart(
                 f'{int(width)}', va='center', fontsize=13, fontweight='bold', color='#2d3436'
             )
 
+        ax.tick_params(axis='y', pad=10, labelsize=11)
         _add_watermark(fig)
         _style_axes(ax)
 
-        plt.tight_layout(rect=[0.01, 0.07, 0.99, 0.90])
+        plt.tight_layout(rect=[0.02, 0.08, 0.98, 0.92])
         plt.savefig(path, dpi=DPI, facecolor=fig.get_facecolor())
         plt.close(fig)
 
@@ -129,9 +142,9 @@ def generate_weekday_chart(
         bars = ax.bar(days, values, color=colors, edgecolor='white', linewidth=1)
 
         clean_title = _clean_title(title)
-        fig.text(
-            0.5, 0.94, f"Средняя длина поста по дням недели: {clean_title}",
-            fontsize=22, fontweight='bold', ha='center', va='center', color='#2d3436'
+        fig.suptitle(
+            f"Средняя длина поста по дням недели: {clean_title}",
+            fontsize=20, fontweight='bold', color='#2d3436', y=0.96
         )
 
         for bar in bars:
@@ -144,7 +157,7 @@ def generate_weekday_chart(
         _add_watermark(fig)
         _style_axes(ax)
 
-        plt.tight_layout(rect=[0.01, 0.07, 0.99, 0.90])
+        plt.tight_layout(rect=[0.02, 0.08, 0.98, 0.92])
         plt.savefig(path, dpi=DPI, facecolor=fig.get_facecolor())
         plt.close(fig)
 
@@ -194,9 +207,9 @@ def generate_hour_chart(
         bars = ax.bar(hours, values, color=colors, width=0.82, edgecolor='white', linewidth=0.4)
 
         clean_title = _clean_title(title)
-        fig.text(
-            0.5, 0.94, f"Время публикаций постов • {clean_title}",
-            fontsize=22, fontweight='bold', ha='center', va='center', color='#2d3436'
+        fig.suptitle(
+            f"Время публикаций постов • {clean_title}",
+            fontsize=20, fontweight='bold', color='#2d3436', y=0.96
         )
 
         for bar in bars:
@@ -255,7 +268,8 @@ def generate_names_chart(
         Путь к файлу или None.
     """
     try:
-        if len(top_names) < 2:
+        # Минимум 3 уникальных имени для генерации графика
+        if len(top_names) < 3:
             return None
 
         filtered = [item for item in top_names if item[1] >= min_mentions] or top_names[:max_entries]
@@ -280,9 +294,9 @@ def generate_names_chart(
         clean_title = _clean_title(title)
 
         # Заголовок
-        fig.text(
-            0.5, 0.97, f"Топ упомянутых личностей • {clean_title}",
-            fontsize=20, fontweight='bold', ha='center', va='center', color='#2d3436'
+        fig.suptitle(
+            f"Топ упомянутых личностей • {clean_title}",
+            fontsize=18, fontweight='bold', color='#2d3436', y=0.98
         )
 
         # Подзаголовок со статистикой
@@ -291,8 +305,8 @@ def generate_names_chart(
             if total_mentions > 0:
                 subtitle += f" • Всего упоминаний: {total_mentions}"
             fig.text(
-                0.5, 0.935, subtitle,
-                fontsize=12, ha='center', va='center', color='#636e72', style='italic'
+                0.5, 0.94, subtitle,
+                fontsize=11, ha='center', va='center', color='#636e72', style='italic'
             )
 
         # Подписи значений на барах
@@ -305,13 +319,13 @@ def generate_names_chart(
 
         ax.set_xlim(0, max(counts) * 1.12 if counts else 10)
         ax.set_xlabel('Количество упоминаний', fontsize=11, labelpad=10, color='#2d3436')
-        ax.tick_params(axis='y', labelsize=10)
+        ax.tick_params(axis='y', labelsize=10, pad=10)
         ax.tick_params(axis='x', labelsize=9)
         ax.grid(axis='x', linestyle='--', alpha=0.3, color='gray')
         _style_axes(ax)
         _add_watermark(fig)
 
-        plt.tight_layout(rect=[0.02, 0.06, 0.98, 0.90])
+        plt.tight_layout(rect=[0.02, 0.07, 0.98, 0.91])
         plt.savefig(path, dpi=160, bbox_inches='tight', facecolor=fig.get_facecolor())
         plt.close(fig)
 
@@ -356,9 +370,9 @@ def generate_phrases_chart(
         bars = ax.barh(labels, counts, color=colors, edgecolor='white', linewidth=1)
 
         clean_title = _clean_title(title)
-        fig.text(
-            0.5, 0.94, f"Топ-{top_n} часто используемых фраз: {clean_title}",
-            fontsize=22, fontweight='bold', ha='center', va='center', color='#2d3436'
+        fig.suptitle(
+            f"Топ-{top_n} часто используемых фраз: {clean_title}",
+            fontsize=20, fontweight='bold', color='#2d3436', y=0.96
         )
 
         for bar in bars:
@@ -368,10 +382,11 @@ def generate_phrases_chart(
                 f'{int(width)}', va='center', fontsize=13, fontweight='bold', color='#2d3436'
             )
 
+        ax.tick_params(axis='y', pad=10, labelsize=10)
         _add_watermark(fig)
         _style_axes(ax)
 
-        plt.tight_layout(rect=[0.01, 0.07, 0.99, 0.90])
+        plt.tight_layout(rect=[0.02, 0.08, 0.98, 0.92])
         plt.savefig(path, dpi=DPI, facecolor=fig.get_facecolor())
         plt.close(fig)
 

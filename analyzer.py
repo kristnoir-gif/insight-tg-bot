@@ -9,10 +9,9 @@ from datetime import datetime
 
 import numpy as np
 from telethon import TelegramClient
-from nltk.util import ngrams
 
 from config import MOSCOW_TZ, DEFAULT_MESSAGE_LIMIT
-from nlp.processor import get_clean_words, extract_emojis
+from nlp.processor import get_clean_words, extract_emojis, extract_phrases
 from nlp.constants import positive_words, aggressive_words
 from visualization.wordclouds import (
     generate_main_cloud,
@@ -189,13 +188,10 @@ async def analyze_channel(
             total_mentions=total_names_mentions
         )
 
-        # Фразы (триграммы)
-        all_tokens: list[str] = []
-        for _, text in posts:
-            all_tokens.extend(re.findall(r'\b\w+\b', text.lower()))
-        trigrams_list = list(ngrams(all_tokens, 3))
-        top_trigrams = Counter(trigrams_list).most_common(10)
-        phrases_path = generate_phrases_chart(channel_id, top_trigrams, title)
+        # Фразы (триграммы) с фильтрацией
+        all_texts = [text for _, text in posts]
+        top_phrases = extract_phrases(all_texts, n=3)[:10]
+        phrases_path = generate_phrases_chart(channel_id, top_phrases, title)
 
         # Эмодзи
         emoji_freq = Counter(all_emojis)

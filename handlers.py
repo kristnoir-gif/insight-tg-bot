@@ -21,6 +21,39 @@ from db import register_user, log_request, get_stats, is_admin
 
 logger = logging.getLogger(__name__)
 
+# Режим приватного доступа (только для админа)
+PRIVATE_MODE = True
+
+
+async def _check_access(message: types.Message) -> bool:
+    """Проверяет доступ пользователя. Возвращает True если доступ разрешён."""
+    if not PRIVATE_MODE:
+        return True
+    if is_admin(message.from_user.id):
+        return True
+    await message.answer("🔒 Бот находится в режиме тестирования. Доступ ограничен.")
+    return False
+
+
+def _get_emotional_tone(scream_index: float) -> str:
+    """
+    Преобразует числовой индекс крика в описательный эмоциональный тон.
+
+    Args:
+        scream_index: Числовой индекс (0-10+).
+
+    Returns:
+        Описание эмоционального тона.
+    """
+    if scream_index <= 1.5:
+        return "😌 Спокойный"
+    elif scream_index <= 4.0:
+        return "😐 Умеренный"
+    elif scream_index <= 7.0:
+        return "😤 Экспрессивный"
+    else:
+        return "🔥 Взрывной"
+
 router = Router()
 
 # Ссылка на Telegram-клиент (устанавливается при запуске)
@@ -57,6 +90,9 @@ def _get_channel_keyboard() -> ReplyKeyboardMarkup:
 @router.message(Command("start"))
 async def cmd_start(message: types.Message) -> None:
     """Обработчик команды /start."""
+    if not await _check_access(message):
+        return
+
     user = message.from_user
     logger.info(f"Пользователь {user.id} запустил бота")
 
@@ -106,6 +142,9 @@ async def cmd_admin(message: types.Message) -> None:
 @router.message(F.chat_shared)
 async def handle_chat_shared(message: types.Message) -> None:
     """Обработчик выбора канала через кнопку."""
+    if not await _check_access(message):
+        return
+
     chat_shared: ChatShared = message.chat_shared
 
     if chat_shared.request_id != 1:
@@ -127,6 +166,9 @@ async def handle_chat_shared(message: types.Message) -> None:
 async def handle_msg(message: types.Message) -> None:
     """Обработчик текстовых сообщений с юзернеймом канала."""
     if message.text.startswith('/'):
+        return
+
+    if not await _check_access(message):
         return
 
     user = message.from_user
@@ -175,12 +217,15 @@ async def _perform_analysis(message: types.Message, channel: str | int) -> None:
         # Логируем успешный запрос
         log_request(user.id)
 
+        # Получаем эмоциональный тон
+        emotional_tone = _get_emotional_tone(result.stats.scream_index)
+
         # Формируем caption со статистикой
         caption = (
             f"📊 Канал: {result.title}\n\n"
             f"📚 Уникальных слов: {result.stats.unique_count}\n"
             f"📏 Средняя длина поста: {result.stats.avg_len} слов\n"
-            f"🗣️ Индекс крика: {result.stats.scream_index}\n"
+            f"🎭 Эмоциональный тон: {emotional_tone}\n"
             f"👤 Упомянуто личностей: {result.stats.unique_names_count} "
             f"({result.stats.total_names_mentions} упоминаний)"
         )

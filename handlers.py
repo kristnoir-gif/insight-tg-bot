@@ -4,7 +4,7 @@
 import os
 import logging
 
-from aiogram import Router, types, F
+from aiogram import Router, types, F, Bot
 from aiogram.filters import Command
 from aiogram.types import (
     FSInputFile,
@@ -13,16 +13,32 @@ from aiogram.types import (
     KeyboardButton,
     KeyboardButtonRequestChat,
     ChatShared,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    LabeledPrice,
+    PreCheckoutQuery,
+    Message,
 )
 from telethon import TelegramClient
 
 from analyzer import analyze_channel, AnalysisError
-from db import register_user, log_request, get_stats, is_admin
+from db import (
+    register_user, log_request, get_stats, is_admin,
+    check_user_access, consume_analysis, add_paid_balance, set_premium,
+    FREE_DAILY_LIMIT,
+)
 
 logger = logging.getLogger(__name__)
 
 # Режим приватного доступа (только для админа)
 PRIVATE_MODE = True
+
+# Белый список пользователей (username без @)
+ALLOWED_USERS = {"ltdnt"}
+
+# Настройки платежей (Telegram Stars)
+PACK_10_PRICE = 75  # Stars за 10 анализов
+PACK_WEEKLY_PRICE = 250  # Stars за неделю безлимита
 
 
 async def _check_access(message: types.Message) -> bool:
@@ -30,6 +46,9 @@ async def _check_access(message: types.Message) -> bool:
     if not PRIVATE_MODE:
         return True
     if is_admin(message.from_user.id):
+        return True
+    # Проверяем username в белом списке
+    if message.from_user.username and message.from_user.username.lower() in ALLOWED_USERS:
         return True
     await message.answer("🔒 Бот находится в режиме тестирования. Доступ ограничен.")
     return False
@@ -80,10 +99,33 @@ def _get_channel_keyboard() -> ReplyKeyboardMarkup:
                         bot_administrator_rights=None,
                     ),
                 )
+            ],
+            [
+                KeyboardButton(text="👁️ Глубже в смыслы")
             ]
         ],
         resize_keyboard=True,
         one_time_keyboard=False,
+    )
+
+
+def _get_buy_keyboard() -> InlineKeyboardMarkup:
+    """Создаёт inline-клавиатуру с вариантами покупки."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔮 Пакет инсайтов (+10)",
+                    callback_data="buy_pack_10"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="👑 Режим Визионера (7 дней безлимита)",
+                    callback_data="buy_weekly"
+                )
+            ],
+        ]
     )
 
 
@@ -101,7 +143,7 @@ async def cmd_start(message: types.Message) -> None:
 
     await message.answer(
         "📊 *Добро пожаловать в Insight Bot!*\n\n"
-        "Я анализирую публичные Telegram-каналы и выворачиваю их смыслы наизнанку.\n\n"
+        "Я анализирую публичные Telegram-каналы и выворачиваю их смыслы наизнанку. Вы можете бесплатно проанализировать два канала.\n\n"
         "🔹 Нажми кнопку ниже, чтобы выбрать канал\n"
         "🔹 Или просто отправь юзернейм (например: `polozhnyak`)",
         parse_mode="Markdown",
@@ -137,6 +179,104 @@ async def cmd_admin(message: types.Message) -> None:
         f"{top_text}",
         parse_mode="Markdown",
     )
+
+
+@router.message(Command("buy"))
+async def cmd_buy(message: types.Message) -> None:
+    """Обработчик команды /buy — покупка анализов."""
+    if not await _check_access(message):
+        return
+
+    user = message.from_user
+    register_user(user.id, user.username)
+
+    status = check_user_access(user.id)
+
+    # Формируем информацию о текущем статусе
+    status_text = ""
+    if status.is_premium:
+        status_text = f"⭐ У вас Premium до {status.premium_until.strftime('%d.%m.%Y')}\n\n"
+    else:
+        remaining_free = max(0, status.daily_limit - status.daily_used)
+        status_text = (
+            f"📊 Бесплатных сегодня: {remaining_free}/{status.daily_limit}\n"
+            f"💰 Платный баланс: {status.paid_balance} анализов\n\n"
+        )
+
+    await message.answer(
+        f"💎 *Покупка анализов*\n\n"
+        f"{status_text}"
+        f"Твоего текущего доступа достаточно для поверхностного взгляда, но чтобы увидеть всё — боту нужен дополнительный заряд. Выбери свой путь:",
+        parse_mode="Markdown",
+        reply_markup=_get_buy_keyboard(),
+    )
+
+
+@router.message(F.text == "👁️ Глубже в смыслы")
+async def handle_buy_button(message: types.Message) -> None:
+    """Обработчик кнопки покупки в основном меню."""
+    await cmd_buy(message)
+
+
+@router.callback_query(F.data == "buy_pack_10")
+async def callback_buy_pack_10(callback: types.CallbackQuery) -> None:
+    """Обработчик покупки пакета 10 анализов."""
+    await callback.answer()
+
+    await callback.message.answer_invoice(
+        title="Пакет 10 анализов",
+        description="10 дополнительных анализов каналов",
+        payload="pack_10",
+        currency="XTR",  # Telegram Stars
+        prices=[LabeledPrice(label="10 анализов", amount=PACK_10_PRICE)],
+    )
+
+
+@router.callback_query(F.data == "buy_weekly")
+async def callback_buy_weekly(callback: types.CallbackQuery) -> None:
+    """Обработчик покупки недельного безлимита."""
+    await callback.answer()
+
+    await callback.message.answer_invoice(
+        title="Безлимит на неделю",
+        description="Неограниченное количество анализов на 7 дней",
+        payload="weekly_unlimited",
+        currency="XTR",  # Telegram Stars
+        prices=[LabeledPrice(label="Безлимит 7 дней", amount=PACK_WEEKLY_PRICE)],
+    )
+
+
+@router.pre_checkout_query()
+async def handle_pre_checkout(pre_checkout: PreCheckoutQuery) -> None:
+    """Обработчик pre-checkout запроса — всегда подтверждаем."""
+    await pre_checkout.answer(ok=True)
+
+
+@router.message(F.successful_payment)
+async def handle_successful_payment(message: Message) -> None:
+    """Обработчик успешного платежа."""
+    user = message.from_user
+    payment = message.successful_payment
+    payload = payment.invoice_payload
+
+    logger.info(f"Успешный платёж от {user.id}: {payload}, {payment.total_amount} Stars")
+
+    if payload == "pack_10":
+        add_paid_balance(user.id, 10)
+        await message.answer(
+            "✅ *Спасибо за покупку!*\n\n"
+            "На ваш баланс добавлено 10 анализов.\n"
+            "Отправьте юзернейм канала для анализа.",
+            parse_mode="Markdown",
+        )
+    elif payload == "weekly_unlimited":
+        set_premium(user.id, 7)
+        await message.answer(
+            "✅ *Спасибо за покупку!*\n\n"
+            "Вам активирован безлимитный доступ на 7 дней.\n"
+            "Отправьте юзернейм канала для анализа.",
+            parse_mode="Markdown",
+        )
 
 
 @router.message(F.chat_shared)
@@ -203,7 +343,25 @@ async def _perform_analysis(message: types.Message, channel: str | int) -> None:
         return
 
     user = message.from_user
-    status = await message.answer("🛸 Извлекаю смыслы... Подождите минутку")
+
+    # Проверяем доступ пользователя
+    access = check_user_access(user.id)
+    if not access.can_analyze:
+        remaining_text = ""
+        if access.daily_limit > 0:
+            remaining_text = f"Бесплатный лимит: {access.daily_used}/{access.daily_limit}\n"
+        if access.paid_balance > 0:
+            remaining_text += f"Платный баланс: {access.paid_balance}\n"
+
+        await message.answer(
+            f"⏳ *Лимит исчерпан*\n\n"
+            f"Энергия на сегодня исчерпана. Чтобы продолжить исследование прямо сейчас, пополни запас кристаллов или возвращайся завтра. ✨",
+            parse_mode="Markdown",
+            reply_markup=_get_buy_keyboard(),
+        )
+        return
+
+    status_msg = await message.answer("🛸 Извлекаю смыслы... Подождите минутку")
 
     try:
         # Telethon поддерживает как username (str), так и chat_id (int)
@@ -211,11 +369,11 @@ async def _perform_analysis(message: types.Message, channel: str | int) -> None:
 
         if result is None or result.cloud_path is None:
             await message.answer("❌ Ошибка или канал пуст.")
-            await status.delete()
+            await status_msg.delete()
             return
 
-        # Логируем успешный запрос
-        log_request(user.id)
+        # Списываем анализ в зависимости от типа доступа
+        consume_analysis(user.id, access.reason)
 
         # Получаем эмоциональный тон
         emotional_tone = _get_emotional_tone(result.stats.scream_index)
@@ -279,6 +437,6 @@ async def _perform_analysis(message: types.Message, channel: str | int) -> None:
 
     finally:
         try:
-            await status.delete()
+            await status_msg.delete()
         except Exception:
             pass

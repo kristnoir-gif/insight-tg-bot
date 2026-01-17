@@ -1,19 +1,35 @@
 """
 Модуль для работы с SQLite базой данных.
-Отслеживание пользователей и статистики использования.
+Отслеживание пользователей, лимитов и платежей.
 """
 import sqlite3
 import logging
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from pathlib import Path
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
 # Путь к базе данных
 DB_PATH = Path(__file__).parent / "users.db"
 
-# ID администратора (замените на свой Telegram ID)
-ADMIN_ID = 123456789  # TODO: Укажите свой Telegram ID
+# ID администратора
+ADMIN_ID = 26643106  # Telegram User ID
+
+# Лимиты
+FREE_DAILY_LIMIT = 2  # Бесплатных анализов в день
+
+
+@dataclass
+class UserStatus:
+    """Статус доступа пользователя."""
+    can_analyze: bool
+    reason: str
+    daily_used: int
+    daily_limit: int
+    paid_balance: int
+    is_premium: bool
+    premium_until: datetime | None
 
 
 def init_db() -> None:
@@ -27,9 +43,26 @@ def init_db() -> None:
                 user_id INTEGER PRIMARY KEY,
                 username TEXT,
                 request_count INTEGER DEFAULT 0,
-                first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                daily_requests_count INTEGER DEFAULT 0,
+                last_request_date DATE,
+                paid_balance INTEGER DEFAULT 0,
+                premium_until TIMESTAMP
             )
         """)
+
+        # Миграция: добавляем новые колонки если их нет
+        cursor.execute("PRAGMA table_info(users)")
+        columns = [col[1] for col in cursor.fetchall()]
+
+        if 'daily_requests_count' not in columns:
+            cursor.execute("ALTER TABLE users ADD COLUMN daily_requests_count INTEGER DEFAULT 0")
+        if 'last_request_date' not in columns:
+            cursor.execute("ALTER TABLE users ADD COLUMN last_request_date DATE")
+        if 'paid_balance' not in columns:
+            cursor.execute("ALTER TABLE users ADD COLUMN paid_balance INTEGER DEFAULT 0")
+        if 'premium_until' not in columns:
+            cursor.execute("ALTER TABLE users ADD COLUMN premium_until TIMESTAMP")
 
         conn.commit()
         conn.close()
@@ -40,13 +73,7 @@ def init_db() -> None:
 
 
 def register_user(user_id: int, username: str | None) -> None:
-    """
-    Регистрирует нового пользователя или обновляет username существующего.
-
-    Args:
-        user_id: Telegram ID пользователя.
-        username: Username пользователя (может быть None).
-    """
+    """Регистрирует нового пользователя или обновляет username."""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -65,13 +92,226 @@ def register_user(user_id: int, username: str | None) -> None:
         logger.error(f"Ошибка регистрации пользователя {user_id}: {e}")
 
 
-def log_request(user_id: int) -> None:
+def check_user_access(user_id: int) -> UserStatus:
     """
-    Увеличивает счётчик запросов пользователя на 1.
+    Проверяет доступ пользователя к анализу.
+
+    Приоритет:
+    1. Админ — всегда доступ
+    2. Premium (premium_until > now) — доступ
+    3. Дневной лимит не исчерпан — доступ
+    4. Платный баланс > 0 — доступ
+    5. Иначе — нет доступа
+    """
+    # Админ всегда имеет доступ
+    if user_id == ADMIN_ID:
+        return UserStatus(
+            can_analyze=True,
+            reason="admin",
+            daily_used=0,
+            daily_limit=999,
+            paid_balance=999,
+            is_premium=True,
+            premium_until=None
+        )
+
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT daily_requests_count, last_request_date, paid_balance, premium_until
+            FROM users WHERE user_id = ?
+        """, (user_id,))
+
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row:
+            # Новый пользователь
+            return UserStatus(
+                can_analyze=True,
+                reason="free",
+                daily_used=0,
+                daily_limit=FREE_DAILY_LIMIT,
+                paid_balance=0,
+                is_premium=False,
+                premium_until=None
+            )
+
+        daily_count, last_date_str, paid_balance, premium_until_str = row
+        daily_count = daily_count or 0
+        paid_balance = paid_balance or 0
+
+        # Проверяем premium
+        premium_until = None
+        is_premium = False
+        if premium_until_str:
+            premium_until = datetime.fromisoformat(premium_until_str)
+            if premium_until > datetime.now():
+                is_premium = True
+
+        # Сбрасываем дневной счётчик если новый день
+        today = date.today()
+        if last_date_str:
+            last_date = date.fromisoformat(last_date_str)
+            if last_date < today:
+                daily_count = 0
+
+        # Проверяем доступ по приоритету
+        if is_premium:
+            return UserStatus(
+                can_analyze=True,
+                reason="premium",
+                daily_used=daily_count,
+                daily_limit=FREE_DAILY_LIMIT,
+                paid_balance=paid_balance,
+                is_premium=True,
+                premium_until=premium_until
+            )
+
+        if daily_count < FREE_DAILY_LIMIT:
+            return UserStatus(
+                can_analyze=True,
+                reason="free",
+                daily_used=daily_count,
+                daily_limit=FREE_DAILY_LIMIT,
+                paid_balance=paid_balance,
+                is_premium=False,
+                premium_until=premium_until
+            )
+
+        if paid_balance > 0:
+            return UserStatus(
+                can_analyze=True,
+                reason="paid",
+                daily_used=daily_count,
+                daily_limit=FREE_DAILY_LIMIT,
+                paid_balance=paid_balance,
+                is_premium=False,
+                premium_until=premium_until
+            )
+
+        # Лимит исчерпан
+        return UserStatus(
+            can_analyze=False,
+            reason="limit_reached",
+            daily_used=daily_count,
+            daily_limit=FREE_DAILY_LIMIT,
+            paid_balance=paid_balance,
+            is_premium=False,
+            premium_until=premium_until
+        )
+
+    except Exception as e:
+        logger.error(f"Ошибка проверки доступа для {user_id}: {e}")
+        return UserStatus(
+            can_analyze=False,
+            reason="error",
+            daily_used=0,
+            daily_limit=FREE_DAILY_LIMIT,
+            paid_balance=0,
+            is_premium=False,
+            premium_until=None
+        )
+
+
+def consume_analysis(user_id: int, reason: str) -> None:
+    """
+    Списывает анализ в зависимости от типа доступа.
 
     Args:
-        user_id: Telegram ID пользователя.
+        user_id: ID пользователя.
+        reason: Тип доступа ('free', 'paid', 'premium', 'admin').
     """
+    if reason == "admin":
+        return
+
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        today = date.today().isoformat()
+
+        if reason == "free":
+            # Увеличиваем дневной счётчик
+            cursor.execute("""
+                UPDATE users
+                SET daily_requests_count = CASE
+                    WHEN last_request_date = ? THEN daily_requests_count + 1
+                    ELSE 1
+                END,
+                last_request_date = ?,
+                request_count = request_count + 1
+                WHERE user_id = ?
+            """, (today, today, user_id))
+
+        elif reason == "paid":
+            # Списываем с платного баланса
+            cursor.execute("""
+                UPDATE users
+                SET paid_balance = paid_balance - 1,
+                request_count = request_count + 1
+                WHERE user_id = ?
+            """, (user_id,))
+
+        elif reason == "premium":
+            # Premium — просто логируем
+            cursor.execute("""
+                UPDATE users
+                SET request_count = request_count + 1
+                WHERE user_id = ?
+            """, (user_id,))
+
+        conn.commit()
+        conn.close()
+        logger.debug(f"Анализ списан для {user_id}, тип: {reason}")
+
+    except Exception as e:
+        logger.error(f"Ошибка списания анализа для {user_id}: {e}")
+
+
+def add_paid_balance(user_id: int, amount: int) -> None:
+    """Добавляет платный баланс пользователю."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            UPDATE users SET paid_balance = COALESCE(paid_balance, 0) + ?
+            WHERE user_id = ?
+        """, (amount, user_id))
+
+        conn.commit()
+        conn.close()
+        logger.info(f"Добавлен платный баланс {amount} для {user_id}")
+
+    except Exception as e:
+        logger.error(f"Ошибка добавления баланса для {user_id}: {e}")
+
+
+def set_premium(user_id: int, days: int) -> None:
+    """Устанавливает premium статус на указанное количество дней."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        premium_until = datetime.now() + timedelta(days=days)
+
+        cursor.execute("""
+            UPDATE users SET premium_until = ?
+            WHERE user_id = ?
+        """, (premium_until.isoformat(), user_id))
+
+        conn.commit()
+        conn.close()
+        logger.info(f"Premium установлен для {user_id} до {premium_until}")
+
+    except Exception as e:
+        logger.error(f"Ошибка установки premium для {user_id}: {e}")
+
+
+def log_request(user_id: int) -> None:
+    """Увеличивает общий счётчик запросов (для совместимости)."""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -83,39 +323,32 @@ def log_request(user_id: int) -> None:
 
         conn.commit()
         conn.close()
-        logger.debug(f"Запрос залогирован для пользователя: {user_id}")
 
     except Exception as e:
         logger.error(f"Ошибка логирования запроса для {user_id}: {e}")
 
 
 def get_stats() -> dict:
-    """
-    Получает общую статистику использования бота.
-
-    Returns:
-        Словарь со статистикой:
-        - total_users: общее количество пользователей
-        - total_requests: общее количество запросов
-        - active_users: пользователи с хотя бы 1 запросом
-    """
+    """Получает общую статистику использования бота."""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
 
-        # Общее количество пользователей
         cursor.execute("SELECT COUNT(*) FROM users")
         total_users = cursor.fetchone()[0]
 
-        # Общее количество запросов
         cursor.execute("SELECT SUM(request_count) FROM users")
         total_requests = cursor.fetchone()[0] or 0
 
-        # Активные пользователи (с хотя бы 1 запросом)
         cursor.execute("SELECT COUNT(*) FROM users WHERE request_count > 0")
         active_users = cursor.fetchone()[0]
 
-        # Топ-5 пользователей по запросам
+        cursor.execute("SELECT COUNT(*) FROM users WHERE premium_until > datetime('now')")
+        premium_users = cursor.fetchone()[0]
+
+        cursor.execute("SELECT SUM(paid_balance) FROM users")
+        total_paid_balance = cursor.fetchone()[0] or 0
+
         cursor.execute("""
             SELECT user_id, username, request_count
             FROM users
@@ -131,6 +364,8 @@ def get_stats() -> dict:
             "total_users": total_users,
             "total_requests": total_requests,
             "active_users": active_users,
+            "premium_users": premium_users,
+            "total_paid_balance": total_paid_balance,
             "top_users": top_users,
         }
 
@@ -140,6 +375,8 @@ def get_stats() -> dict:
             "total_users": 0,
             "total_requests": 0,
             "active_users": 0,
+            "premium_users": 0,
+            "total_paid_balance": 0,
             "top_users": [],
         }
 

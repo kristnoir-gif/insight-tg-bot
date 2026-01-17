@@ -21,6 +21,7 @@ from natasha import (
     NewsEmbedding,
     NewsMorphTagger,
     NewsNERTagger,
+    NamesExtractor,
     Doc,
 )
 
@@ -44,22 +45,24 @@ _morph_vocab = MorphVocab()
 _emb = NewsEmbedding()
 _morph_tagger = NewsMorphTagger(_emb)
 _ner_tagger = NewsNERTagger(_emb)
+_names_extractor = NamesExtractor(_morph_vocab)
 
 ProcessingMode = Literal['normal', 'mats', 'person']
 
 
 def extract_person_names(text: str) -> list[str]:
     """
-    Извлекает имена людей из текста с помощью NER (Named Entity Recognition).
+    Извлекает имена людей из текста с помощью NamesExtractor из natasha.
 
-    Использует natasha для точного распознавания именованных сущностей типа PER (Person).
-    Нормализует имена к именительному падежу.
+    Использует строгую проверку: только сущности, которые natasha
+    распознала как имя (first), фамилию (last) или отчество (middle).
+    Игнорирует прилагательные и существительные в начале предложений.
 
     Args:
         text: Исходный текст для обработки.
 
     Returns:
-        Список нормализованных имён (в именительном падеже, с заглавной буквы).
+        Список нормализованных имён (в именительном падеже).
     """
     if not text or not text.strip():
         return []
@@ -80,83 +83,67 @@ def extract_person_names(text: str) -> list[str]:
         # Применяем NER
         doc.tag_ner(_ner_tagger)
 
-        # Нормализуем найденные сущности
-        for span in doc.spans:
-            span.normalize(_morph_vocab)
-
-        # Извлекаем только сущности типа PER (Person)
+        # Обрабатываем только сущности типа PER (Person)
         for span in doc.spans:
             if span.type != 'PER':
                 continue
 
-            # Получаем нормализованное имя
-            name = span.normal if span.normal else span.text
+            # Нормализуем span
+            span.normalize(_morph_vocab)
 
-            # Очищаем от лишних пробелов
-            name = ' '.join(name.split())
+            # КЛЮЧЕВОЙ ШАГ: используем NamesExtractor для разбора имени
+            span.extract_fact(_names_extractor)
+
+            # СТРОГАЯ ПРОВЕРКА: должно быть распознано как реальное имя
+            if not span.fact or not span.fact.slots:
+                # NamesExtractor не смог разобрать — это не настоящее имя
+                continue
+
+            # Извлекаем компоненты имени из slots
+            first_name = None
+            last_name = None
+            for slot in span.fact.slots:
+                if slot.key == 'first':
+                    first_name = slot.value
+                elif slot.key == 'last':
+                    last_name = slot.value
+
+            # Должен быть хотя бы first (имя) или last (фамилия)
+            if not first_name and not last_name:
+                continue
+
+            # Собираем нормализованное имя в именительном падеже
+            name_parts = []
+            if first_name:
+                name_parts.append(first_name.capitalize())
+            if last_name:
+                name_parts.append(last_name.capitalize())
+
+            name = ' '.join(name_parts)
 
             # Пропускаем слишком короткие
             if len(name) < 2:
                 continue
 
             # Проверяем чёрный список
-            name_lower = name.lower()
-            if name_lower in PERSON_BLACKLIST:
+            if name.lower() in PERSON_BLACKLIST:
                 continue
 
-            # Дополнительная проверка через pymorphy для фильтрации ложных срабатываний
-            first_word = name.split()[0].lower()
-            parsed = morph.parse(first_word)[0]
-
-            # Проверяем что это не служебное слово
-            excluded_pos = {'PREP', 'CONJ', 'PRCL', 'ADVB', 'PRED', 'INTJ'}
-            if parsed.tag.POS in excluded_pos:
+            # Проверяем каждое слово отдельно в чёрном списке
+            skip = False
+            for word in name.lower().split():
+                if word in PERSON_BLACKLIST:
+                    skip = True
+                    break
+            if skip:
                 continue
 
-            # Проверяем что первое слово не в чёрном списке
-            if parsed.normal_form in PERSON_BLACKLIST:
-                continue
-
-            # Приводим к правильному регистру (каждое слово с заглавной)
-            normalized_name = ' '.join(word.capitalize() for word in name.split())
-
-            names.append(normalized_name)
+            names.append(name)
 
     except Exception as e:
         logger.warning(f"Ошибка NER обработки: {e}")
-        # Fallback на простую логику если NER не сработал
-        return _extract_names_fallback(text)
-
-    return names
-
-
-def _extract_names_fallback(text: str) -> list[str]:
-    """
-    Запасной метод извлечения имён на основе pymorphy (без NER).
-    Используется если natasha недоступна или произошла ошибка.
-    """
-    words = re.findall(r'[а-яА-ЯёЁ]+', text)
-    names: list[str] = []
-
-    for word in words:
-        if not word[0].isupper() or len(word) < 3:
-            continue
-
-        low_word = word.lower()
-        if low_word in PERSON_BLACKLIST:
-            continue
-
-        try:
-            parsed = morph.parse(low_word)[0]
-        except Exception:
-            continue
-
-        tags = parsed.tag
-
-        # Только имена, фамилии и отчества по pymorphy
-        if 'Name' in tags or 'Surn' in tags or 'Patr' in tags:
-            normalized = parsed.normal_form.capitalize()
-            names.append(normalized)
+        # НЕ используем fallback — лучше пустой список чем мусорные данные
+        return []
 
     return names
 

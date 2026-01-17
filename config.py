@@ -42,10 +42,10 @@ CLOUD_HEIGHT: Final[int] = 600
 FIGURE_SIZE: Final[tuple[int, int]] = (12, 7)
 BACKGROUND_COLOR: Final[str] = "#f8f9fa"
 WATERMARK_TEXT: Final[str] = "@insight_tg_bot"
-WATERMARK_COLOR: Final[str] = "#FFC0CB"
+WATERMARK_COLOR: Final[str] = "#752E53"
 
 # --- Анализ ---
-DEFAULT_MESSAGE_LIMIT: Final[int] = 500
+DEFAULT_MESSAGE_LIMIT: Final[int] = 700
 
 
 def validate_config() -> bool:

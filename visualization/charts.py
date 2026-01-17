@@ -293,10 +293,10 @@ def generate_names_chart(
 
         clean_title = _clean_title(title)
 
-        # Заголовок
+        # Заголовок с правильным отступом
         fig.suptitle(
             f"Топ упомянутых личностей • {clean_title}",
-            fontsize=18, fontweight='bold', color='#2d3436', y=0.98
+            fontsize=18, fontweight='bold', color='#2d3436', y=0.95
         )
 
         # Подзаголовок со статистикой
@@ -325,7 +325,8 @@ def generate_names_chart(
         _style_axes(ax)
         _add_watermark(fig)
 
-        plt.tight_layout(rect=[0.02, 0.07, 0.98, 0.91])
+        plt.subplots_adjust(top=0.85)
+        plt.tight_layout(rect=[0.02, 0.07, 0.98, 0.88])
         plt.savefig(path, dpi=160, bbox_inches='tight', facecolor=fig.get_facecolor())
         plt.close(fig)
 

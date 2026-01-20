@@ -1,3 +1,18 @@
+.env
+*.env
+
+__pycache__/
+*.py[cod]
+*.sqlite
+*.db
+
+# Сессии Telethon
+*.session
+
+# Логи и временные файлы
+*.log
+*.tmp
+
 # Telegram session files
 *.session
 *.session-journal

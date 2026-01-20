@@ -19,7 +19,7 @@ from config import (
     LOG_LEVEL,
     validate_config,
 )
-from handlers import router, set_user_clients
+from handlers import router
 from db import init_db
 
 
@@ -77,8 +77,6 @@ async def main() -> None:
             except Exception as e:
                 logger.warning(f"Не удалось запустить backup клиент: {e}")
                 backup_client = None
-
-        set_user_clients(user_client, backup_client)
 
         logger.info("Бот успешно запущен")
 

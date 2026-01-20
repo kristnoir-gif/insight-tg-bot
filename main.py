@@ -14,11 +14,12 @@ from config import (
     API_HASH,
     BOT_TOKEN,
     SESSION_NAME,
+    BACKUP_SESSION_NAME,
     LOG_FORMAT,
     LOG_LEVEL,
     validate_config,
 )
-from handlers import router, set_user_client
+from handlers import router, set_user_clients
 from db import init_db
 
 
@@ -50,12 +51,34 @@ async def main() -> None:
     dp = Dispatcher()
     dp.include_router(router)
 
+    # Основной скрапер-клиент
     user_client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 
+    # Резервный скрапер-клиент (опционально)
+    backup_client = None
     try:
-        # Запуск Telegram-клиента
+        import os
+        backup_session_path = f"{BACKUP_SESSION_NAME}.session"
+        if os.path.exists(backup_session_path):
+            backup_client = TelegramClient(BACKUP_SESSION_NAME, API_ID, API_HASH)
+            logger.info(f"Найдена резервная сессия: {backup_session_path}")
+    except Exception as e:
+        logger.warning(f"Не удалось инициализировать backup клиент: {e}")
+
+    try:
+        # Запуск основного Telegram-клиента
         await user_client.start()
-        set_user_client(user_client)
+
+        # Запуск backup клиента если есть
+        if backup_client:
+            try:
+                await backup_client.start()
+                logger.info("Backup клиент запущен успешно")
+            except Exception as e:
+                logger.warning(f"Не удалось запустить backup клиент: {e}")
+                backup_client = None
+
+        set_user_clients(user_client, backup_client)
 
         logger.info("Бот успешно запущен")
 
@@ -68,6 +91,8 @@ async def main() -> None:
 
     finally:
         await user_client.disconnect()
+        if backup_client:
+            await backup_client.disconnect()
         await bot.session.close()
         logger.info("Бот остановлен")
 

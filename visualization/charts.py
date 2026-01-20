@@ -16,21 +16,38 @@ from config import DPI, BACKGROUND_COLOR, WATERMARK_TEXT, WATERMARK_COLOR
 logger = logging.getLogger(__name__)
 
 
-def _clean_title(title: str, max_length: int = 30) -> str:
+def _clean_title(title: str, max_line_length: int = 25) -> str:
     """
-    Очищает название канала от спецсимволов и обрезает длинные названия.
+    Очищает название канала и разбивает на 2 строки если слишком длинное.
 
     Args:
         title: Название канала.
-        max_length: Максимальная длина (по умолчанию 30 символов).
+        max_line_length: Максимальная длина строки (по умолчанию 25 символов).
 
     Returns:
-        Очищенное и обрезанное название.
+        Очищенное название (с переносом если длинное).
     """
     cleaned = re.sub(r'[^\w\s-]', '', title).strip()
-    if len(cleaned) > max_length:
-        return cleaned[:max_length].rstrip() + '...'
-    return cleaned
+
+    if len(cleaned) <= max_line_length:
+        return cleaned
+
+    # Разбиваем на 2 строки по словам
+    words = cleaned.split()
+    line1 = []
+    line2 = []
+    current_len = 0
+
+    for word in words:
+        if current_len + len(word) + 1 <= max_line_length:
+            line1.append(word)
+            current_len += len(word) + 1
+        else:
+            line2.append(word)
+
+    if line2:
+        return ' '.join(line1) + '\n' + ' '.join(line2)
+    return ' '.join(line1)
 
 
 def _setup_figure(figsize: tuple[int, int] = (12, 7)) -> tuple[plt.Figure, plt.Axes]:
@@ -83,7 +100,7 @@ def generate_top_words_chart(
         path = f"graph_{username}.png"
         fig, ax = _setup_figure()
 
-        colors = cm.plasma(np.linspace(0.2, 0.8, len(labels)))
+        colors = cm.plasma(np.linspace(0.0, 0.55, len(labels)))
         bars = ax.barh(labels, counts, color=colors, edgecolor='white', linewidth=1)
 
         clean_title = _clean_title(title)
@@ -117,15 +134,15 @@ def generate_top_words_chart(
 
 def generate_weekday_chart(
     username: str,
-    avg_lens: dict[int, float],
+    counts: dict[int, int],
     title: str
 ) -> str | None:
     """
-    Генерирует график средней длины поста по дням недели.
+    Генерирует график количества постов по дням недели.
 
     Args:
         username: Имя пользователя/канала.
-        avg_lens: Словарь {день_недели: средняя_длина}.
+        counts: Словарь {день_недели: количество_постов}.
         title: Название канала.
 
     Returns:
@@ -133,17 +150,17 @@ def generate_weekday_chart(
     """
     try:
         days = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
-        values = [avg_lens.get(i, 0) for i in range(7)]
+        values = [counts.get(i, 0) for i in range(7)]
 
         path = f"weekday_{username}.png"
         fig, ax = _setup_figure()
 
-        colors = cm.viridis(np.linspace(0.2, 0.8, 7))
+        colors = cm.viridis(np.linspace(0.15, 0.55, 7))
         bars = ax.bar(days, values, color=colors, edgecolor='white', linewidth=1)
 
         clean_title = _clean_title(title)
         fig.suptitle(
-            f"Средняя длина поста по дням недели: {clean_title}",
+            f"Количество постов по дням недели: {clean_title}",
             fontsize=20, fontweight='bold', color='#2d3436', y=0.96
         )
 
@@ -151,7 +168,7 @@ def generate_weekday_chart(
             height = bar.get_height()
             ax.text(
                 bar.get_x() + bar.get_width() / 2, height + max(values) * 0.01,
-                f'{round(height, 1)}', ha='center', fontsize=13, fontweight='bold', color='#2d3436'
+                f'{int(height)}', ha='center', fontsize=13, fontweight='bold', color='#2d3436'
             )
 
         _add_watermark(fig)
@@ -288,10 +305,13 @@ def generate_names_chart(
         ax.set_facecolor(BACKGROUND_COLOR)
 
         # Градиент от тёплых к холодным цветам
-        colors = cm.plasma(np.linspace(0.15, 0.85, len(labels)))
+        colors = cm.plasma(np.linspace(0.0, 0.55, len(labels)))
         bars = ax.barh(labels, counts, color=colors, height=0.7, edgecolor='white', linewidth=0.8)
 
         clean_title = _clean_title(title)
+
+        # Позиция подзаголовка зависит от того, в 1 или 2 строки заголовок
+        subtitle_y = 0.85 if '\n' in clean_title else 0.89
 
         # Заголовок с правильным отступом
         fig.suptitle(
@@ -305,7 +325,7 @@ def generate_names_chart(
             if total_mentions > 0:
                 subtitle += f" • Всего упоминаний: {total_mentions}"
             fig.text(
-                0.5, 0.94, subtitle,
+                0.5, subtitle_y, subtitle,
                 fontsize=11, ha='center', va='center', color='#636e72', style='italic'
             )
 
@@ -367,7 +387,7 @@ def generate_phrases_chart(
         path = f"phrases_{username}.png"
         fig, ax = _setup_figure()
 
-        colors = cm.viridis(np.linspace(0.2, 0.8, len(labels)))
+        colors = cm.viridis(np.linspace(0.15, 0.55, len(labels)))
         bars = ax.barh(labels, counts, color=colors, edgecolor='white', linewidth=1)
 
         clean_title = _clean_title(title)
@@ -387,7 +407,8 @@ def generate_phrases_chart(
         _add_watermark(fig)
         _style_axes(ax)
 
-        plt.tight_layout(rect=[0.02, 0.08, 0.98, 0.92])
+        plt.subplots_adjust(top=0.85)
+        plt.tight_layout(rect=[0.02, 0.08, 0.98, 0.88])
         plt.savefig(path, dpi=DPI, facecolor=fig.get_facecolor())
         plt.close(fig)
 

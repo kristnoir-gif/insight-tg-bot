@@ -38,7 +38,9 @@
       "Bash(sshpass -p 'v7nx4gI82IlEOTmc' ssh -o StrictHostKeyChecking=no root@144.31.221.168 'pip3 install --break-system-packages natasha && systemctl restart tg-bot')",
       "Bash(sshpass -p 'v7nx4gI82IlEOTmc' ssh -o StrictHostKeyChecking=no root@144.31.221.168 'systemctl status tg-bot --no-pager')",
       "Bash(sshpass:*)",
-      "Bash(rsync:*)"
+      "Bash(rsync:*)",
+      "Bash(source ~/.zshrc)",
+      "Bash(ssh:*)"
     ]
   }
 }

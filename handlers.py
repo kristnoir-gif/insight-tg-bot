@@ -101,7 +101,7 @@ def _get_channel_keyboard() -> ReplyKeyboardMarkup:
                 )
             ],
             [
-                KeyboardButton(text="👁️ Глубже в смыслы")
+                KeyboardButton(text="💎 Купить анализы")
             ]
         ],
         resize_keyboard=True,
@@ -115,13 +115,13 @@ def _get_buy_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🔮 Пакет инсайтов (+10)",
+                    text=f"📦 10 анализов — {PACK_10_PRICE} ⭐",
                     callback_data="buy_pack_10"
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="👑 Режим Визионера (7 дней безлимита)",
+                    text=f"🔥 Безлимит на неделю — {PACK_WEEKLY_PRICE} ⭐",
                     callback_data="buy_weekly"
                 )
             ],
@@ -206,13 +206,13 @@ async def cmd_buy(message: types.Message) -> None:
     await message.answer(
         f"💎 *Покупка анализов*\n\n"
         f"{status_text}"
-        f"Твоего текущего доступа достаточно для поверхностного взгляда, но чтобы увидеть всё — боту нужен дополнительный заряд. Выбери свой путь:",
+        f"Выберите подходящий пакет:",
         parse_mode="Markdown",
         reply_markup=_get_buy_keyboard(),
     )
 
 
-@router.message(F.text == "👁️ Глубже в смыслы")
+@router.message(F.text == "💎 Купить анализы")
 async def handle_buy_button(message: types.Message) -> None:
     """Обработчик кнопки покупки в основном меню."""
     await cmd_buy(message)
@@ -355,7 +355,8 @@ async def _perform_analysis(message: types.Message, channel: str | int) -> None:
 
         await message.answer(
             f"⏳ *Лимит исчерпан*\n\n"
-            f"Энергия на сегодня исчерпана. Чтобы продолжить исследование прямо сейчас, пополни запас кристаллов или возвращайся завтра. ✨",
+            f"{remaining_text}\n"
+            f"Купите дополнительные анализы или подождите до завтра.",
             parse_mode="Markdown",
             reply_markup=_get_buy_keyboard(),
         )

@@ -3,10 +3,11 @@
 Отслеживание пользователей, лимитов и платежей.
 """
 import sqlite3
+import json
 import logging
 from datetime import datetime, date, timedelta
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,9 @@ ADMIN_ID = 26643106  # Telegram User ID
 
 # Лимиты
 FREE_DAILY_LIMIT = 2  # Бесплатных анализов в день
+
+# Кэш
+CACHE_TTL_HOURS = 6  # Время жизни кэша в часах
 
 
 @dataclass
@@ -48,6 +52,17 @@ def init_db() -> None:
                 last_request_date DATE,
                 paid_balance INTEGER DEFAULT 0,
                 premium_until TIMESTAMP
+            )
+        """)
+
+        # Таблица кэша анализов каналов
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS channel_cache (
+                channel_key TEXT PRIMARY KEY,
+                title TEXT,
+                stats_json TEXT,
+                top_emojis_json TEXT,
+                cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
 
@@ -384,3 +399,100 @@ def get_stats() -> dict:
 def is_admin(user_id: int) -> bool:
     """Проверяет, является ли пользователь администратором."""
     return user_id == ADMIN_ID
+
+
+# --- Кэш анализов каналов ---
+
+def get_cached_analysis(channel_key: str) -> dict | None:
+    """
+    Получает кэшированный анализ канала если он не истёк.
+
+    Args:
+        channel_key: Ключ канала (username или id).
+
+    Returns:
+        Словарь с данными или None если кэш не найден/истёк.
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT title, stats_json, top_emojis_json, cached_at
+            FROM channel_cache
+            WHERE channel_key = ?
+        """, (channel_key.lower(),))
+
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row:
+            return None
+
+        title, stats_json, emojis_json, cached_at_str = row
+
+        # Проверяем TTL
+        cached_at = datetime.fromisoformat(cached_at_str)
+        age_hours = (datetime.now() - cached_at).total_seconds() / 3600
+
+        if age_hours > CACHE_TTL_HOURS:
+            logger.debug(f"Кэш для {channel_key} истёк ({age_hours:.1f}ч)")
+            return None
+
+        return {
+            "title": title,
+            "stats": json.loads(stats_json),
+            "top_emojis": json.loads(emojis_json),
+            "cached_at": cached_at,
+            "age_hours": age_hours,
+        }
+
+    except Exception as e:
+        logger.error(f"Ошибка чтения кэша для {channel_key}: {e}")
+        return None
+
+
+def save_analysis_cache(
+    channel_key: str,
+    title: str,
+    stats: object,
+    top_emojis: list
+) -> None:
+    """
+    Сохраняет результат анализа в кэш.
+
+    Args:
+        channel_key: Ключ канала (username или id).
+        title: Название канала.
+        stats: Объект ChannelStats.
+        top_emojis: Список топ эмодзи.
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        # Конвертируем stats в dict если это dataclass
+        stats_dict = asdict(stats) if hasattr(stats, '__dataclass_fields__') else stats
+
+        cursor.execute("""
+            INSERT INTO channel_cache (channel_key, title, stats_json, top_emojis_json, cached_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(channel_key) DO UPDATE SET
+                title = excluded.title,
+                stats_json = excluded.stats_json,
+                top_emojis_json = excluded.top_emojis_json,
+                cached_at = excluded.cached_at
+        """, (
+            channel_key.lower(),
+            title,
+            json.dumps(stats_dict, ensure_ascii=False),
+            json.dumps(top_emojis, ensure_ascii=False),
+            datetime.now().isoformat()
+        ))
+
+        conn.commit()
+        conn.close()
+        logger.info(f"Кэш сохранён для канала: {channel_key}")
+
+    except Exception as e:
+        logger.error(f"Ошибка сохранения кэша для {channel_key}: {e}")

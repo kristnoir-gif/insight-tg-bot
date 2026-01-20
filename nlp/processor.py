@@ -6,6 +6,7 @@
 import re
 import logging
 from typing import Literal
+from collections import Counter
 
 import emoji
 
@@ -214,29 +215,91 @@ def extract_emojis(text: str) -> list[str]:
     return [c for c in text if emoji.is_emoji(c)]
 
 
+def _is_valid_phrase(gram: tuple[str, ...], meaningful_pos: set[str]) -> bool:
+    """
+    Проверяет качество фразы.
+
+    Args:
+        gram: Кортеж слов (n-грамма).
+        meaningful_pos: Набор значимых частей речи.
+
+    Returns:
+        True если фраза качественная.
+    """
+    # Не начинается/не заканчивается стоп-словом
+    if gram[0] in PHRASE_STOPWORDS or gram[-1] in PHRASE_STOPWORDS:
+        return False
+
+    # Не все слова короткие
+    if all(len(w) < 3 for w in gram):
+        return False
+
+    # Должен быть хотя бы 1 NOUN или VERB
+    has_noun_or_verb = False
+    for word in gram:
+        try:
+            parsed = morph.parse(word)[0]
+            if parsed.tag.POS in {'NOUN', 'VERB', 'INFN'}:
+                has_noun_or_verb = True
+                break
+        except Exception:
+            pass
+
+    return has_noun_or_verb
+
+
+def _merge_and_deduplicate(
+    bigrams: Counter[tuple[str, ...]],
+    trigrams: Counter[tuple[str, ...]]
+) -> Counter[tuple[str, ...]]:
+    """
+    Объединяет биграммы и триграммы, убирая дубликаты.
+
+    Если биграмма входит в частую триграмму, оставляем только триграмму.
+    """
+    result: Counter[tuple[str, ...]] = Counter()
+
+    # Добавляем триграммы с минимум 2 вхождениями
+    for gram, count in trigrams.items():
+        if count >= 2:
+            result[gram] = count
+
+    # Создаём набор текстов триграмм для проверки
+    trigram_texts = {' '.join(g) for g in trigrams.keys() if trigrams[g] >= 2}
+
+    # Добавляем биграммы, которые не являются частью частых триграмм
+    for gram, count in bigrams.items():
+        if count >= 2:
+            gram_text = ' '.join(gram)
+            # Проверяем, не входит ли биграмма в популярную триграмму
+            is_part_of_trigram = any(gram_text in t for t in trigram_texts)
+            if not is_part_of_trigram:
+                result[gram] = count
+
+    return result
+
+
 def extract_phrases(texts: list[str], n: int = 3) -> list[tuple[tuple[str, ...], int]]:
     """
-    Извлекает осмысленные фразы (n-граммы) из текстов.
+    Извлекает осмысленные фразы (биграммы и триграммы) из текстов.
 
     Фильтрация:
     - Фразы не начинаются и не заканчиваются стоп-словами
-    - Содержат хотя бы одно существительное или глагол
-    - Не состоят только из коротких слов (< 3 букв)
-    - Очищены от спецсимволов
+    - Должен быть хотя бы один NOUN или VERB
+    - Биграммы, входящие в частые триграммы, исключаются
 
     Args:
         texts: Список текстов для обработки.
-        n: Размер n-граммы (по умолчанию 3 - триграммы).
+        n: Игнорируется (для совместимости). Извлекаются и 2- и 3-граммы.
 
     Returns:
         Список кортежей (фраза, количество), отсортированный по убыванию.
     """
-    from collections import Counter
-
     # Части речи, которые придают фразе смысл
     MEANINGFUL_POS = {'NOUN', 'VERB', 'INFN', 'ADJF', 'ADJS', 'PRTF', 'PRTS'}
 
-    phrase_counter: Counter[tuple[str, ...]] = Counter()
+    bigram_counter: Counter[tuple[str, ...]] = Counter()
+    trigram_counter: Counter[tuple[str, ...]] = Counter()
 
     for text in texts:
         if not text or not text.strip():
@@ -248,41 +311,20 @@ def extract_phrases(texts: list[str], n: int = 3) -> list[tuple[tuple[str, ...],
         # Извлекаем только кириллические слова (без цифр и спецсимволов)
         words = re.findall(r'[а-яА-ЯёЁ]+', text.lower())
 
-        if len(words) < n:
-            continue
+        # Собираем биграммы
+        if len(words) >= 2:
+            for gram in ngrams(words, 2):
+                if _is_valid_phrase(gram, MEANINGFUL_POS):
+                    bigram_counter[gram] += 1
 
-        # Создаём n-граммы
-        for gram in ngrams(words, n):
-            first_word = gram[0]
-            last_word = gram[-1]
+        # Собираем триграммы
+        if len(words) >= 3:
+            for gram in ngrams(words, 3):
+                if _is_valid_phrase(gram, MEANINGFUL_POS):
+                    trigram_counter[gram] += 1
 
-            # Фильтр 1: Не начинается/не заканчивается стоп-словом
-            if first_word in PHRASE_STOPWORDS or last_word in PHRASE_STOPWORDS:
-                continue
-
-            # Фильтр 2: Не все слова короче 3 букв
-            if all(len(w) < 3 for w in gram):
-                continue
-
-            # Фильтр 3: Содержит хотя бы одно значимое слово (NOUN/VERB/ADJ)
-            has_meaningful = False
-            for word in gram:
-                try:
-                    parsed = morph.parse(word)[0]
-                    if parsed.tag.POS in MEANINGFUL_POS:
-                        has_meaningful = True
-                        break
-                except Exception:
-                    continue
-
-            if not has_meaningful:
-                continue
-
-            # Фильтр 4: Пропускаем фразы где все слова - стоп-слова
-            if all(w in PHRASE_STOPWORDS for w in gram):
-                continue
-
-            phrase_counter[gram] += 1
+    # Объединяем и фильтруем дубликаты
+    combined = _merge_and_deduplicate(bigram_counter, trigram_counter)
 
     # Возвращаем отсортированный список
-    return phrase_counter.most_common()
+    return combined.most_common()

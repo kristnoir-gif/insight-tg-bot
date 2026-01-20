@@ -29,6 +29,7 @@ API_ID: Final[int] = int(os.getenv("API_ID", "0"))
 API_HASH: Final[str] = os.getenv("API_HASH", "")
 BOT_TOKEN: Final[str] = os.getenv("BOT_TOKEN", "")
 SESSION_NAME: Final[str] = os.getenv("SESSION_NAME", "user_session")
+BACKUP_SESSION_NAME: Final[str] = os.getenv("BACKUP_SESSION_NAME", "ltdnt_session")
 
 # --- Временная зона ---
 MOSCOW_TZ: Final[timezone] = timezone(timedelta(hours=3))

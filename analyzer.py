@@ -9,14 +9,17 @@ from datetime import datetime
 
 import numpy as np
 from telethon import TelegramClient
+from telethon.errors import UsernameNotOccupiedError, UsernameInvalidError, FloodWaitError
 
 from config import MOSCOW_TZ, DEFAULT_MESSAGE_LIMIT
 from nlp.processor import get_clean_words, extract_emojis, extract_phrases
-from nlp.constants import positive_words, aggressive_words
+from nlp.constants import positive_words, aggressive_words, METAPHYSICS_WORDS, EVERYDAY_WORDS
 from visualization.wordclouds import (
     generate_main_cloud,
     generate_sentiment_cloud,
     generate_mats_cloud,
+    generate_register_cloud,
+    generate_dichotomy_cloud,
 )
 from visualization.charts import (
     generate_top_words_chart,
@@ -42,6 +45,8 @@ class ChannelStats:
     scream_index: float = 0.0
     unique_names_count: int = 0
     total_names_mentions: int = 0
+    repost_count: int = 0
+    repost_percent: float = 0.0
 
 
 @dataclass
@@ -60,6 +65,8 @@ class AnalysisResult:
     hour_path: str | None = None
     names_path: str | None = None
     phrases_path: str | None = None
+    register_path: str | None = None
+    dichotomy_path: str | None = None
 
     # Данные
     top_emojis: list[tuple[str, int]] = field(default_factory=list)
@@ -69,7 +76,8 @@ class AnalysisResult:
         paths = [
             self.cloud_path, self.graph_path, self.mats_path,
             self.positive_path, self.aggressive_path, self.weekday_path,
-            self.hour_path, self.names_path, self.phrases_path
+            self.hour_path, self.names_path, self.phrases_path,
+            self.register_path, self.dichotomy_path
         ]
         return [p for p in paths if p]
 
@@ -99,8 +107,24 @@ async def analyze_channel(
 
         logger.info(f"Начат анализ канала: {channel}")
 
-        # Получение данных канала (Telethon поддерживает и username, и chat_id)
-        entity = await client.get_entity(channel)
+        # Получение данных канала с fallback
+        entity = None
+        try:
+            entity = await client.get_entity(channel)
+        except ValueError as e:
+            # Если не удалось найти по ID, пробуем как username
+            if "Could not find the input entity" in str(e):
+                logger.warning(f"Канал {channel} не найден по ID, пробую как username")
+                # Очищаем от возможных префиксов
+                clean_channel = str(channel).lstrip('@').split('/')[-1].strip()
+                if clean_channel:
+                    try:
+                        entity = await client.get_entity(clean_channel)
+                    except (ValueError, UsernameNotOccupiedError, UsernameInvalidError):
+                        pass
+            if entity is None:
+                raise
+
         title = entity.title
 
         # Используем username или id для имён файлов
@@ -108,6 +132,11 @@ async def analyze_channel(
 
         messages = [m async for m in client.iter_messages(entity, limit=limit) if m.text]
         posts: list[tuple[datetime, str]] = [(m.date, m.text) for m in messages]
+
+        # Подсчёт репостов (сообщения с forward)
+        repost_count = sum(1 for m in messages if m.forward is not None)
+        total_messages = len(messages)
+        repost_percent = round(repost_count / total_messages * 100, 1) if total_messages > 0 else 0.0
 
         if not posts:
             logger.warning(f"Канал {channel} пуст или нет текстовых сообщений")
@@ -120,6 +149,8 @@ async def analyze_channel(
         mat_words: list[str] = []
         pos_words: list[str] = []
         agg_words: list[str] = []
+        metaphysics_words: list[str] = []
+        everyday_words: list[str] = []
         names: list[str] = []
         all_emojis: list[str] = []
 
@@ -135,6 +166,8 @@ async def analyze_channel(
             clean = get_clean_words(text, 'normal')
             pos_words.extend(w for w in clean if w in positive_words)
             agg_words.extend(w for w in clean if w in aggressive_words)
+            metaphysics_words.extend(w for w in clean if w in METAPHYSICS_WORDS)
+            everyday_words.extend(w for w in clean if w in EVERYDAY_WORDS)
 
             if text:
                 alpha_count = sum(1 for c in text if c.isalpha())
@@ -166,12 +199,9 @@ async def analyze_channel(
         pos_path = generate_sentiment_cloud(channel_id, pos_words, title, 'positive')
         agg_path = generate_sentiment_cloud(channel_id, agg_words, title, 'aggressive')
 
-        # Статистика по дням недели
-        weekday_lens: dict[int, list[int]] = {i: [] for i in range(7)}
-        for date, text in posts:
-            weekday_lens[date.astimezone(MOSCOW_TZ).weekday()].append(len(text.split()))
-        avg_lens = {wd: np.mean(lens) if lens else 0 for wd, lens in weekday_lens.items()}
-        weekday_path = generate_weekday_chart(channel_id, avg_lens, title)
+        # Статистика по дням недели (количество постов)
+        weekday_counts = Counter(date.astimezone(MOSCOW_TZ).weekday() for date, _ in posts)
+        weekday_path = generate_weekday_chart(channel_id, dict(weekday_counts), title)
 
         # Статистика по часам
         hour_counts = Counter((date.astimezone(MOSCOW_TZ)).hour for date, _ in posts)
@@ -193,6 +223,40 @@ async def analyze_channel(
         top_phrases = extract_phrases(all_texts, n=3)[:10]
         phrases_path = generate_phrases_chart(channel_id, top_phrases, title)
 
+        # Облако регистра (CAPS vs lowercase)
+        caps_words: list[str] = []
+        lower_words: list[str] = []
+        total_register_words = 0
+
+        for _, text in posts:
+            # Извлекаем только кириллические слова 3+ букв
+            words = re.findall(r'[а-яА-ЯёЁ]{3,}', text)
+            for word in words:
+                total_register_words += 1
+                if word.isupper():
+                    caps_words.append(word)
+                elif word.islower():
+                    lower_words.append(word)
+
+        # Считаем проценты
+        caps_percent = (len(caps_words) / total_register_words * 100) if total_register_words > 0 else 0
+        lower_percent = (len(lower_words) / total_register_words * 100) if total_register_words > 0 else 0
+
+        # Генерируем облако регистра
+        register_path = generate_register_cloud(
+            channel_id, caps_words, lower_words, title,
+            caps_percent, lower_percent
+        )
+
+        # Дихотомия языка (метафизика vs быт)
+        dichotomy_total = len(metaphysics_words) + len(everyday_words)
+        meta_percent = (len(metaphysics_words) / dichotomy_total * 100) if dichotomy_total > 0 else 0
+        everyday_percent = (len(everyday_words) / dichotomy_total * 100) if dichotomy_total > 0 else 0
+        dichotomy_path = generate_dichotomy_cloud(
+            channel_id, metaphysics_words, everyday_words, title,
+            meta_percent, everyday_percent
+        )
+
         # Эмодзи
         emoji_freq = Counter(all_emojis)
         top_emojis = emoji_freq.most_common(20)
@@ -208,6 +272,8 @@ async def analyze_channel(
             scream_index=scream_index,
             unique_names_count=unique_names_count,
             total_names_mentions=total_names_mentions,
+            repost_count=repost_count,
+            repost_percent=repost_percent,
         )
 
         logger.info(f"Анализ канала {channel_id} завершён успешно")
@@ -224,8 +290,13 @@ async def analyze_channel(
             hour_path=hour_path,
             names_path=names_path,
             phrases_path=phrases_path,
+            register_path=register_path,
+            dichotomy_path=dichotomy_path,
             top_emojis=top_emojis,
         )
+
+    except FloodWaitError:
+        raise  # Пробрасываем для обработки в handlers.py
 
     except Exception as e:
         logger.error(f"Ошибка анализа канала {channel}: {e}")

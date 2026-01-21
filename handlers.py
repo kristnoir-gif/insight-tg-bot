@@ -199,6 +199,12 @@ def _get_buy_keyboard() -> InlineKeyboardMarkup:
                     callback_data="buy_weekly"
                 )
             ],
+            [
+                InlineKeyboardButton(
+                    text="❤️ Мне нравится бот — 1 ⭐",
+                    callback_data="donate"
+                )
+            ],
         ]
     )
 
@@ -425,6 +431,20 @@ async def callback_buy_weekly(callback: types.CallbackQuery) -> None:
     )
 
 
+@router.callback_query(F.data == "donate")
+async def callback_donate(callback: types.CallbackQuery) -> None:
+    """Обработчик доната."""
+    await callback.answer()
+
+    await callback.message.answer_invoice(
+        title="Поддержать бота",
+        description="Спасибо, что пользуетесь ботом!",
+        payload="donate",
+        currency="XTR",
+        prices=[LabeledPrice(label="Донат", amount=1)],
+    )
+
+
 @router.pre_checkout_query()
 async def handle_pre_checkout(pre_checkout: PreCheckoutQuery) -> None:
     """Обработчик pre-checkout запроса — всегда подтверждаем."""
@@ -462,6 +482,12 @@ async def handle_successful_payment(message: Message) -> None:
             "✅ *Спасибо за покупку!*\n\n"
             "Вам активирован безлимитный доступ на 7 дней.\n"
             "Отправьте юзернейм канала для анализа.",
+            parse_mode="Markdown",
+        )
+    elif payload == "donate":
+        await message.answer(
+            "❤️ *Спасибо за поддержку!*\n\n"
+            "Ваш донат очень ценен для развития бота!",
             parse_mode="Markdown",
         )
 

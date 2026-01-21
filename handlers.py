@@ -270,19 +270,11 @@ async def cmd_admin(message: types.Message) -> None:
 
     stats = get_stats()
 
-    # Формируем топ пользователей
-    top_users_text = ""
-    if stats["top_users"]:
-        top_users_text = "\n\n👑 *Топ-5 пользователей:*\n"
-        for i, (uid, uname, count) in enumerate(stats["top_users"], 1):
-            name = f"@{uname}" if uname else f"ID:{uid}"
-            top_users_text += f"{i}. {name} — {count} запросов\n"
-
     # Формируем топ каналов (по подписчикам)
     top_channels_text = ""
     top_channels = get_top_channels(5)
     if top_channels:
-        top_channels_text = "\n📺 *Топ-5 каналов (по подписчикам):*\n"
+        top_channels_text = "\n\n📺 *Топ-5 анализируемых каналов:*\n"
         for i, (channel_key, title, subs) in enumerate(top_channels, 1):
             if subs >= 1_000_000:
                 subs_str = f"{subs / 1_000_000:.1f}M"
@@ -292,26 +284,11 @@ async def cmd_admin(message: types.Message) -> None:
                 subs_str = str(subs)
             top_channels_text += f"{i}. {title} — {subs_str}\n"
 
-    # Рассчитываем конверсии
-    total = stats['total_users']
-    active = stats['active_users']
-    paid = stats.get('paid_users', 0)
-
-    conv_active = (active / total * 100) if total > 0 else 0
-    conv_paid = (paid / total * 100) if total > 0 else 0
-    conv_paid_from_active = (paid / active * 100) if active > 0 else 0
-
     await message.answer(
         f"📈 *Статистика бота*\n\n"
         f"👥 Всего пользователей: {stats['total_users']}\n"
         f"✅ Активных (сделали анализ): {stats['active_users']}\n"
-        f"💰 Оплативших: {paid}\n"
-        f"📊 Всего анализов: {stats['total_requests']}\n\n"
-        f"📊 *Конверсии:*\n"
-        f"Старт → Анализ: {conv_active:.1f}%\n"
-        f"Старт → Оплата: {conv_paid:.1f}%\n"
-        f"Анализ → Оплата: {conv_paid_from_active:.1f}%"
-        f"{top_users_text}"
+        f"📊 Всего анализов: {stats['total_requests']}"
         f"{top_channels_text}",
         parse_mode="Markdown",
     )

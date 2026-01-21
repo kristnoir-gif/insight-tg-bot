@@ -14,8 +14,8 @@ logger = logging.getLogger(__name__)
 # Путь к базе данных
 DB_PATH = Path(__file__).parent / "users.db"
 
-# ID администратора
-ADMIN_ID = 26643106  # Telegram User ID
+# ID администраторов
+ADMIN_IDS = {26643106, 6856259901}  # Telegram User IDs
 
 # Лимиты
 FREE_DAILY_LIMIT = 1  # Бесплатных анализов в день
@@ -140,7 +140,7 @@ def check_user_access(user_id: int) -> UserStatus:
     5. Иначе — нет доступа
     """
     # Админ всегда имеет доступ
-    if user_id == ADMIN_ID:
+    if user_id in ADMIN_IDS:
         return UserStatus(
             can_analyze=True,
             reason="admin",
@@ -425,7 +425,7 @@ def get_stats() -> dict:
 
 def is_admin(user_id: int) -> bool:
     """Проверяет, является ли пользователь администратором."""
-    return user_id == ADMIN_ID
+    return user_id in ADMIN_IDS
 
 
 def get_all_user_ids() -> list[int]:
@@ -470,7 +470,7 @@ def get_top_channels(limit: int = 5) -> list[tuple[str, str, int]]:
         cursor.execute("""
             SELECT channel_key, title, subscribers
             FROM channel_stats
-            WHERE subscribers > 0
+            WHERE analysis_count > 0
             ORDER BY subscribers DESC
             LIMIT ?
         """, (limit,))

@@ -39,6 +39,7 @@ PRIVATE_MODE = False
 ALLOWED_USERS = {"ltdnt"}
 
 # Настройки платежей (Telegram Stars)
+PACK_3_PRICE = 20  # Stars за 3 анализа
 PACK_10_PRICE = 75  # Stars за 10 анализов
 PACK_WEEKLY_PRICE = 250  # Stars за неделю безлимита
 
@@ -180,6 +181,12 @@ def _get_buy_keyboard() -> InlineKeyboardMarkup:
     """Создаёт inline-клавиатуру с вариантами покупки."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"🎯 3 анализа — {PACK_3_PRICE} ⭐",
+                    callback_data="buy_pack_3"
+                )
+            ],
             [
                 InlineKeyboardButton(
                     text=f"📦 10 анализов — {PACK_10_PRICE} ⭐",
@@ -399,6 +406,20 @@ async def handle_buy_button(message: types.Message) -> None:
     await cmd_buy(message)
 
 
+@router.callback_query(F.data == "buy_pack_3")
+async def callback_buy_pack_3(callback: types.CallbackQuery) -> None:
+    """Обработчик покупки пакета 3 анализов."""
+    await callback.answer()
+
+    await callback.message.answer_invoice(
+        title="3 анализа каналов",
+        description="Проанализируйте 3 любых Telegram-канала",
+        payload="pack_3",
+        currency="XTR",  # Telegram Stars
+        prices=[LabeledPrice(label="3 анализа", amount=PACK_3_PRICE)],
+    )
+
+
 @router.callback_query(F.data == "buy_pack_10")
 async def callback_buy_pack_10(callback: types.CallbackQuery) -> None:
     """Обработчик покупки пакета 10 анализов."""
@@ -442,7 +463,15 @@ async def handle_successful_payment(message: Message) -> None:
 
     logger.info(f"Успешный платёж от {user.id}: {payload}, {payment.total_amount} Stars")
 
-    if payload == "pack_10":
+    if payload == "pack_3":
+        add_paid_balance(user.id, 3)
+        await message.answer(
+            "✅ *Спасибо за покупку!*\n\n"
+            "На ваш баланс добавлено 3 анализа.\n"
+            "Отправьте юзернейм канала для анализа.",
+            parse_mode="Markdown",
+        )
+    elif payload == "pack_10":
         add_paid_balance(user.id, 10)
         await message.answer(
             "✅ *Спасибо за покупку!*\n\n"
@@ -511,16 +540,9 @@ async def _perform_analysis(message: types.Message, channel: str | int) -> None:
     # Проверяем доступ пользователя
     access = check_user_access(user.id)
     if not access.can_analyze:
-        remaining_text = ""
-        if access.daily_limit > 0:
-            remaining_text = f"Бесплатный лимит: {access.daily_used}/{access.daily_limit}\n"
-        if access.paid_balance > 0:
-            remaining_text += f"Платный баланс: {access.paid_balance}\n"
-
         await message.answer(
-            f"⏳ *Лимит исчерпан*\n\n"
-            f"{remaining_text}\n"
-            f"Купите дополнительные анализы или подождите до завтра.",
+            "❌ *Твои бесплатные анализы закончились!*\n\n"
+            "Чтобы продолжить, купи ещё анализы за звёзды ⭐",
             parse_mode="Markdown",
             reply_markup=_get_buy_keyboard(),
         )

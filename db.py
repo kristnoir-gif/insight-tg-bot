@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 DB_PATH = Path(__file__).parent / "users.db"
 
 # ID администраторов
-ADMIN_IDS = {26643106, 6856259901}  # Telegram User IDs
+ADMIN_ID = 26643106  # Основной админ (для уведомлений)
+ADMIN_IDS = {26643106, 6856259901}  # Все админы (для доступа к /admin)
 
 # Лимиты
 FREE_DAILY_LIMIT = 1  # Бесплатных анализов в день

@@ -366,7 +366,10 @@ async def cmd_buy(message: types.Message) -> None:
     # Формируем информацию о текущем статусе
     status_text = ""
     if status.is_premium:
-        status_text = f"⭐ У вас Premium до {status.premium_until.strftime('%d.%m.%Y')}\n\n"
+        if status.premium_until:
+            status_text = f"⭐ У вас Premium до {status.premium_until.strftime('%d.%m.%Y')}\n\n"
+        else:
+            status_text = "⭐ У вас безлимитный доступ\n\n"
     else:
         remaining_free = max(0, status.daily_limit - status.daily_used)
         status_text = (

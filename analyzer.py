@@ -2,16 +2,27 @@
 Модуль анализа Telegram-каналов.
 """
 import re
+import os
+import json
+import shutil
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from collections import Counter
 from datetime import datetime
+from time import time as time_now
 
 import numpy as np
 from telethon import TelegramClient
 from telethon.errors import UsernameNotOccupiedError, UsernameInvalidError, FloodWaitError
 
 from config import MOSCOW_TZ, DEFAULT_MESSAGE_LIMIT
+
+# Кэширование результатов анализа
+CACHE_DIR = "cache"
+CACHE_TTL_SECONDS = 4 * 60 * 60  # 4 часа (снижение нагрузки)
+MESSAGES_DELAY_INTERVAL = 50   # Пауза каждые N сообщений (было 100)
+MESSAGES_DELAY_SECONDS = 1.5   # Длительность паузы (было 1.0)
 from nlp.processor import get_clean_words, extract_emojis, extract_phrases
 from nlp.constants import positive_words, aggressive_words, METAPHYSICS_WORDS, EVERYDAY_WORDS
 from visualization.wordclouds import (
@@ -53,6 +64,7 @@ class ChannelStats:
 class AnalysisResult:
     """Результат анализа канала."""
     title: str = ""
+    subscribers: int = 0
     stats: ChannelStats = field(default_factory=ChannelStats)
 
     # Пути к файлам визуализации
@@ -82,6 +94,133 @@ class AnalysisResult:
         return [p for p in paths if p]
 
 
+def _get_cache_path(channel_id: str) -> str:
+    """Возвращает путь к папке кэша для канала."""
+    return os.path.join(CACHE_DIR, channel_id.lower())
+
+
+def _is_cache_valid(channel_id: str) -> bool:
+    """Проверяет, есть ли валидный кэш для канала."""
+    cache_path = _get_cache_path(channel_id)
+    meta_path = os.path.join(cache_path, "meta.json")
+
+    if not os.path.exists(meta_path):
+        return False
+
+    try:
+        with open(meta_path, "r") as f:
+            meta = json.load(f)
+        cached_at = meta.get("cached_at", 0)
+        if time_now() - cached_at < CACHE_TTL_SECONDS:
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+def _load_from_cache(channel_id: str) -> AnalysisResult | None:
+    """Загружает результат из кэша."""
+    cache_path = _get_cache_path(channel_id)
+    meta_path = os.path.join(cache_path, "meta.json")
+
+    try:
+        with open(meta_path, "r") as f:
+            meta = json.load(f)
+
+        result = AnalysisResult(
+            title=meta.get("title", ""),
+            subscribers=meta.get("subscribers", 0),
+            stats=ChannelStats(
+                unique_count=meta.get("unique_count", 0),
+                avg_len=meta.get("avg_len", 0.0),
+                scream_index=meta.get("scream_index", 0.0),
+                unique_names_count=meta.get("unique_names_count", 0),
+                total_names_mentions=meta.get("total_names_mentions", 0),
+            ),
+            top_emojis=[(e[0], e[1]) for e in meta.get("top_emojis", [])],
+        )
+
+        # Копируем изображения из кэша во временные файлы
+        for img_name in ["cloud.png", "graph.png", "mats.png", "positive.png",
+                         "aggressive.png", "weekday.png", "hour.png",
+                         "names.png", "phrases.png"]:
+            src = os.path.join(cache_path, img_name)
+            if os.path.exists(src):
+                dst = f"{channel_id}_{img_name}"
+                shutil.copy(src, dst)
+                attr_name = img_name.replace(".png", "_path")
+                if attr_name == "cloud_path":
+                    result.cloud_path = dst
+                elif attr_name == "graph_path":
+                    result.graph_path = dst
+                elif attr_name == "mats_path":
+                    result.mats_path = dst
+                elif attr_name == "positive_path":
+                    result.positive_path = dst
+                elif attr_name == "aggressive_path":
+                    result.aggressive_path = dst
+                elif attr_name == "weekday_path":
+                    result.weekday_path = dst
+                elif attr_name == "hour_path":
+                    result.hour_path = dst
+                elif attr_name == "names_path":
+                    result.names_path = dst
+                elif attr_name == "phrases_path":
+                    result.phrases_path = dst
+
+        logger.info(f"Загружен кэш для канала {channel_id}")
+        return result
+
+    except Exception as e:
+        logger.warning(f"Ошибка загрузки кэша: {e}")
+        return None
+
+
+def _save_to_cache(channel_id: str, result: AnalysisResult) -> None:
+    """Сохраняет результат в кэш."""
+    cache_path = _get_cache_path(channel_id)
+
+    try:
+        os.makedirs(cache_path, exist_ok=True)
+
+        # Сохраняем метаданные
+        meta = {
+            "cached_at": time_now(),
+            "title": result.title,
+            "subscribers": result.subscribers,
+            "unique_count": result.stats.unique_count,
+            "avg_len": result.stats.avg_len,
+            "scream_index": result.stats.scream_index,
+            "unique_names_count": result.stats.unique_names_count,
+            "total_names_mentions": result.stats.total_names_mentions,
+            "top_emojis": result.top_emojis,
+        }
+        with open(os.path.join(cache_path, "meta.json"), "w") as f:
+            json.dump(meta, f)
+
+        # Копируем изображения в кэш
+        path_mapping = {
+            "cloud.png": result.cloud_path,
+            "graph.png": result.graph_path,
+            "mats.png": result.mats_path,
+            "positive.png": result.positive_path,
+            "aggressive.png": result.aggressive_path,
+            "weekday.png": result.weekday_path,
+            "hour.png": result.hour_path,
+            "names.png": result.names_path,
+            "phrases.png": result.phrases_path,
+        }
+        for cache_name, src_path in path_mapping.items():
+            if src_path and os.path.exists(src_path):
+                shutil.copy(src_path, os.path.join(cache_path, cache_name))
+
+        logger.info(f"Сохранён кэш для канала {channel_id}")
+
+    except Exception as e:
+        logger.warning(f"Ошибка сохранения кэша: {e}")
+
+
 async def analyze_channel(
     client: TelegramClient,
     channel: str | int,
@@ -101,6 +240,16 @@ async def analyze_channel(
     Raises:
         AnalysisError: При критических ошибках анализа.
     """
+    # Определяем channel_id для кэша
+    channel_key = str(channel).lstrip('@').split('/')[-1].strip().lower()
+
+    # Проверяем кэш
+    if _is_cache_valid(channel_key):
+        cached_result = _load_from_cache(channel_key)
+        if cached_result and cached_result.cloud_path:
+            logger.info(f"Используем кэш для канала {channel}")
+            return cached_result
+
     try:
         if not client.is_connected():
             await client.connect()
@@ -126,11 +275,22 @@ async def analyze_channel(
                 raise
 
         title = entity.title
+        subscribers = getattr(entity, 'participants_count', 0) or 0
 
         # Используем username или id для имён файлов
         channel_id = getattr(entity, 'username', None) or str(entity.id)
 
-        messages = [m async for m in client.iter_messages(entity, limit=limit) if m.text]
+        # Получаем сообщения с задержками для предотвращения FloodWait
+        messages = []
+        msg_count = 0
+        async for m in client.iter_messages(entity, limit=limit):
+            if m.text:
+                messages.append(m)
+            msg_count += 1
+            # Пауза каждые N сообщений для снижения нагрузки на API
+            if msg_count % MESSAGES_DELAY_INTERVAL == 0:
+                await asyncio.sleep(MESSAGES_DELAY_SECONDS)
+
         posts: list[tuple[datetime, str]] = [(m.date, m.text) for m in messages]
 
         # Подсчёт репостов (сообщения с forward)
@@ -140,7 +300,7 @@ async def analyze_channel(
 
         if not posts:
             logger.warning(f"Канал {channel} пуст или нет текстовых сообщений")
-            return AnalysisResult(title=title)
+            return AnalysisResult(title=title, subscribers=subscribers)
 
         logger.info(f"Получено {len(posts)} сообщений из канала {channel}")
 
@@ -179,7 +339,7 @@ async def analyze_channel(
 
         if not all_words:
             logger.warning(f"Не удалось извлечь слова из канала {channel}")
-            return AnalysisResult(title=title)
+            return AnalysisResult(title=title, subscribers=subscribers)
 
         # Диагностика периода
         oldest = min(d for d, _ in posts)
@@ -278,8 +438,9 @@ async def analyze_channel(
 
         logger.info(f"Анализ канала {channel_id} завершён успешно")
 
-        return AnalysisResult(
+        result = AnalysisResult(
             title=title,
+            subscribers=subscribers,
             stats=stats,
             cloud_path=cloud_path,
             graph_path=graph_path,
@@ -294,6 +455,11 @@ async def analyze_channel(
             dichotomy_path=dichotomy_path,
             top_emojis=top_emojis,
         )
+
+        # Сохраняем в кэш для последующих запросов
+        _save_to_cache(channel_id.lower(), result)
+
+        return result
 
     except FloodWaitError:
         raise  # Пробрасываем для обработки в handlers.py

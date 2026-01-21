@@ -5,6 +5,8 @@
 import asyncio
 import logging
 import sys
+import traceback
+from datetime import datetime
 
 from aiogram import Bot, Dispatcher
 from telethon import TelegramClient
@@ -19,8 +21,8 @@ from config import (
     LOG_LEVEL,
     validate_config,
 )
-from handlers import router
-from db import init_db
+from handlers import router, set_user_client, set_backup_client, set_bot_instance
+from db import init_db, ADMIN_ID
 
 
 def setup_logging() -> None:
@@ -32,6 +34,14 @@ def setup_logging() -> None:
             logging.StreamHandler(sys.stdout),
         ]
     )
+
+
+async def notify_admin(bot: Bot, message: str) -> None:
+    """Отправляет уведомление админу."""
+    try:
+        await bot.send_message(ADMIN_ID, message)
+    except Exception as e:
+        logging.error(f"Не удалось отправить уведомление админу: {e}")
 
 
 async def main() -> None:
@@ -50,6 +60,7 @@ async def main() -> None:
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
     dp.include_router(router)
+    set_bot_instance(bot)  # Для уведомлений из очереди
 
     # Основной скрапер-клиент
     user_client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
@@ -68,11 +79,13 @@ async def main() -> None:
     try:
         # Запуск основного Telegram-клиента
         await user_client.start()
+        set_user_client(user_client)
 
         # Запуск backup клиента если есть
         if backup_client:
             try:
                 await backup_client.start()
+                set_backup_client(backup_client)
                 logger.info("Backup клиент запущен успешно")
             except Exception as e:
                 logger.warning(f"Не удалось запустить backup клиент: {e}")
@@ -80,11 +93,22 @@ async def main() -> None:
 
         logger.info("Бот успешно запущен")
 
+        # Уведомляем админа о запуске
+        await notify_admin(bot, f"✅ Бот запущен\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
+
         # Запуск polling
         await dp.start_polling(bot, skip_updates=True)
 
     except Exception as e:
         logger.exception(f"Критическая ошибка: {e}")
+        # Уведомляем админа о падении
+        error_text = traceback.format_exc()[-500:]  # Последние 500 символов
+        await notify_admin(
+            bot,
+            f"🚨 *Бот упал!*\n\n"
+            f"🕐 {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\n\n"
+            f"```\n{error_text}\n```"
+        )
         raise
 
     finally:

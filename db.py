@@ -18,7 +18,7 @@ DB_PATH = Path(__file__).parent / "users.db"
 ADMIN_ID = 26643106  # Telegram User ID
 
 # Лимиты
-FREE_DAILY_LIMIT = 2  # Бесплатных анализов в день
+FREE_DAILY_LIMIT = 1  # Бесплатных анализов в день
 
 # Кэш
 CACHE_TTL_HOURS = 6  # Время жизни кэша в часах
@@ -66,6 +66,16 @@ def init_db() -> None:
             )
         """)
 
+        # Таблица статистики анализов каналов
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS channel_stats (
+                channel_key TEXT PRIMARY KEY,
+                title TEXT,
+                analysis_count INTEGER DEFAULT 1,
+                last_analyzed TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Миграция: добавляем новые колонки если их нет
         cursor.execute("PRAGMA table_info(users)")
         columns = [col[1] for col in cursor.fetchall()]
@@ -78,6 +88,17 @@ def init_db() -> None:
             cursor.execute("ALTER TABLE users ADD COLUMN paid_balance INTEGER DEFAULT 0")
         if 'premium_until' not in columns:
             cursor.execute("ALTER TABLE users ADD COLUMN premium_until TIMESTAMP")
+
+        # Миграция channel_stats: добавляем колонку subscribers
+        cursor.execute("PRAGMA table_info(channel_stats)")
+        cs_columns = [col[1] for col in cursor.fetchall()]
+        if 'subscribers' not in cs_columns:
+            cursor.execute("ALTER TABLE channel_stats ADD COLUMN subscribers INTEGER DEFAULT 0")
+
+        # Индексы для ускорения запросов
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_last_request ON users(last_request_date)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_premium ON users(premium_until)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_channel_stats_subs ON channel_stats(subscribers)")
 
         conn.commit()
         conn.close()
@@ -364,6 +385,10 @@ def get_stats() -> dict:
         cursor.execute("SELECT SUM(paid_balance) FROM users")
         total_paid_balance = cursor.fetchone()[0] or 0
 
+        # Пользователи, которые покупали анализы
+        cursor.execute("SELECT COUNT(*) FROM users WHERE paid_balance > 0 OR premium_until > datetime('now')")
+        paid_users = cursor.fetchone()[0]
+
         cursor.execute("""
             SELECT user_id, username, request_count
             FROM users
@@ -381,6 +406,7 @@ def get_stats() -> dict:
             "active_users": active_users,
             "premium_users": premium_users,
             "total_paid_balance": total_paid_balance,
+            "paid_users": paid_users,
             "top_users": top_users,
         }
 
@@ -392,6 +418,7 @@ def get_stats() -> dict:
             "active_users": 0,
             "premium_users": 0,
             "total_paid_balance": 0,
+            "paid_users": 0,
             "top_users": [],
         }
 
@@ -399,6 +426,60 @@ def get_stats() -> dict:
 def is_admin(user_id: int) -> bool:
     """Проверяет, является ли пользователь администратором."""
     return user_id == ADMIN_ID
+
+
+def get_all_user_ids() -> list[int]:
+    """Возвращает список всех user_id из базы."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id FROM users")
+        result = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        return result
+    except Exception as e:
+        logger.error(f"Ошибка получения user_id: {e}")
+        return []
+
+
+def log_channel_analysis(channel_key: str, title: str, subscribers: int = 0) -> None:
+    """Записывает анализ канала в статистику."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO channel_stats (channel_key, title, analysis_count, last_analyzed, subscribers)
+            VALUES (?, ?, 1, datetime('now'), ?)
+            ON CONFLICT(channel_key) DO UPDATE SET
+                title = excluded.title,
+                analysis_count = analysis_count + 1,
+                last_analyzed = datetime('now'),
+                subscribers = excluded.subscribers
+        """, (channel_key.lower(), title, subscribers))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Ошибка записи статистики канала: {e}")
+
+
+def get_top_channels(limit: int = 5) -> list[tuple[str, str, int]]:
+    """Возвращает топ каналов по количеству подписчиков."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT channel_key, title, subscribers
+            FROM channel_stats
+            WHERE subscribers > 0
+            ORDER BY subscribers DESC
+            LIMIT ?
+        """, (limit,))
+        result = cursor.fetchall()
+        conn.close()
+        return result
+    except Exception as e:
+        logger.error(f"Ошибка получения топ каналов: {e}")
+        return []
 
 
 # --- Кэш анализов каналов ---

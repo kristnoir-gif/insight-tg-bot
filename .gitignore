@@ -1,6 +1,9 @@
 .env
 *.env
 
+# Деплой скрипт (содержит данные сервера)
+deploy.sh
+
 __pycache__/
 *.py[cod]
 *.sqlite
@@ -12,6 +15,9 @@ __pycache__/
 # Логи и временные файлы
 *.log
 *.tmp
+
+# Кэш анализов
+cache/
 
 # Telegram session files
 *.session

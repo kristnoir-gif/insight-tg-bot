@@ -46,7 +46,7 @@ WATERMARK_TEXT: Final[str] = "@insight_tg_bot"
 WATERMARK_COLOR: Final[str] = "#752E53"
 
 # --- Анализ ---
-DEFAULT_MESSAGE_LIMIT: Final[int] = 700
+DEFAULT_MESSAGE_LIMIT: Final[int] = 500  # было 700, снижено для уменьшения нагрузки
 
 
 def validate_config() -> bool:

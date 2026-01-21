@@ -16,3 +16,6 @@ numpy>=2.0
 
 # Environment
 python-dotenv>=1.0
+
+# HTTP health endpoint
+aiohttp>=3.8

@@ -113,7 +113,7 @@ def _is_cache_valid(channel_id: str) -> bool:
         cached_at = meta.get("cached_at", 0)
         if time_now() - cached_at < CACHE_TTL_SECONDS:
             return True
-    except Exception:
+    except (json.JSONDecodeError, OSError):
         pass
 
     return False
@@ -172,7 +172,7 @@ def _load_from_cache(channel_id: str) -> AnalysisResult | None:
         logger.info(f"Загружен кэш для канала {channel_id}")
         return result
 
-    except Exception as e:
+    except (json.JSONDecodeError, OSError, KeyError) as e:
         logger.warning(f"Ошибка загрузки кэша: {e}")
         return None
 
@@ -217,7 +217,7 @@ def _save_to_cache(channel_id: str, result: AnalysisResult) -> None:
 
         logger.info(f"Сохранён кэш для канала {channel_id}")
 
-    except Exception as e:
+    except OSError as e:
         logger.warning(f"Ошибка сохранения кэша: {e}")
 
 

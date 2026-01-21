@@ -9,6 +9,7 @@ from collections import defaultdict
 
 from aiogram import Router, types, F, Bot
 from aiogram.filters import Command
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import (
     FSInputFile,
     InputMediaPhoto,
@@ -25,12 +26,33 @@ from telethon.errors import FloodWaitError
 
 from analyzer import analyze_channel, AnalysisError
 from db import (
-    register_user, log_request, get_stats, is_admin, get_all_user_ids,
-    check_user_access, consume_analysis, add_paid_balance, set_premium,
-    log_channel_analysis, get_top_channels, FREE_DAILY_LIMIT,
+    register_user,
+    get_stats,
+    is_admin,
+    get_all_user_ids,
+    get_paid_user_ids,
+    check_user_access,
+    consume_analysis,
+    add_paid_balance,
+    set_premium,
+    log_channel_analysis,
+    get_top_channels,
+    get_top_channels_by_subscribers,
+    log_floodwait_event,
+    get_floodwait_stats,
+    add_pending_analysis,
+    get_pending_analyses_for_user,
+    remove_pending_analysis,
+    FREE_DAILY_LIMIT,
+    DB_PATH,
 )
 
 logger = logging.getLogger(__name__)
+
+# Per-client cooldowns при FloodWait (каждый аккаунт независимо)
+_main_cooldown_until: float = 0.0  # unix time
+_backup_cooldown_until: float = 0.0
+_third_cooldown_until: float = 0.0
 
 # Режим приватного доступа (только для админа)
 PRIVATE_MODE = False
@@ -41,15 +63,17 @@ ALLOWED_USERS = {"ltdnt"}
 # Настройки платежей (Telegram Stars)
 PACK_3_PRICE = 20  # Stars за 3 анализа
 PACK_10_PRICE = 75  # Stars за 10 анализов
-PACK_WEEKLY_PRICE = 250  # Stars за неделю безлимита
+PACK_50_PRICE = 250  # Stars за 50 анализов
 
-# Rate limiting (защита от спама)
-RATE_LIMIT_SECONDS = 60  # Минимальный интервал между запросами (было 30)
+# Rate limiting (защита от спама и флудвейта)
+RATE_LIMIT_SECONDS = 180  # Минимальный интервал между запросами (увеличено до 3 минут)
+DELAY_BETWEEN_ANALYSES = 5  # Задержка между анализами (в секундах)
 _user_last_request: dict[int, float] = defaultdict(float)
 
 # Очередь запросов (ограничение параллельных анализов)
 MAX_CONCURRENT_ANALYSES = 1  # 1 анализ для снижения нагрузки на API
-AVERAGE_ANALYSIS_TIME = 120  # Секунд на один анализ (для расчёта времени ожидания)
+AVERAGE_ANALYSIS_TIME = 150  # Секунд на один анализ (для расчёта времени ожидания)
+MAX_QUEUE_WAITERS = 2  # максимум ожидающих в очереди, дальше просим попробовать позже
 _analysis_semaphore: asyncio.Semaphore | None = None
 _queue_position: int = 0  # Счётчик ожидающих в очереди
 _bot_instance: Bot | None = None  # Для отправки уведомлений из очереди
@@ -82,7 +106,7 @@ async def notify_admin_flood(wait_seconds: int, channel: str) -> None:
                 f"Рекомендация: подождать или использовать другой аккаунт.",
                 parse_mode="Markdown"
             )
-        except Exception as e:
+        except TelegramAPIError as e:
             logger.error(f"Не удалось уведомить админа о FloodWait: {e}")
 
 
@@ -149,6 +173,7 @@ router = Router()
 # Ссылки на Telegram-клиенты (устанавливаются при запуске)
 _user_client: TelegramClient | None = None
 _backup_client: TelegramClient | None = None
+_third_client: TelegramClient | None = None
 
 
 def set_user_client(client: TelegramClient) -> None:
@@ -163,15 +188,29 @@ def set_backup_client(client: TelegramClient) -> None:
     _backup_client = client
 
 
-def _get_main_keyboard() -> ReplyKeyboardMarkup:
+def set_third_client(client: TelegramClient) -> None:
+    """Устанавливает третий клиент Telegram для анализа."""
+    global _third_client
+    _third_client = client
+
+
+def _get_main_keyboard(user_id: int = 0) -> ReplyKeyboardMarkup:
     """Создаёт основную клавиатуру."""
+    keyboard = [
+        [
+            KeyboardButton(text="💎 Купить анализы"),
+            KeyboardButton(text="❓ Помощь")
+        ]
+    ]
+    # Добавляем кнопки админки для админов
+    if is_admin(user_id):
+        keyboard.append([
+            KeyboardButton(text="📊 Админка"),
+            KeyboardButton(text="📺 Топ каналов")
+        ])
+
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(text="💎 Купить анализы"),
-                KeyboardButton(text="❓ Помощь")
-            ]
-        ],
+        keyboard=keyboard,
         resize_keyboard=True,
         one_time_keyboard=False,
     )
@@ -195,8 +234,8 @@ def _get_buy_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text=f"🔥 Безлимит на неделю — {PACK_WEEKLY_PRICE} ⭐",
-                    callback_data="buy_weekly"
+                    text=f"🎁 50 анализов — {PACK_50_PRICE} ⭐",
+                    callback_data="buy_pack_50"
                 )
             ],
             [
@@ -236,9 +275,9 @@ async def cmd_start(message: types.Message) -> None:
         "👤 Упоминаемые личности\n"
         "💬 Популярные фразы\n"
         "😀 Топ эмодзи\n\n"
-        "✨ *1 бесплатный анализ в день*",
+        "💎 *Анализы доступны после покупки за звёзды*",
         parse_mode="Markdown",
-        reply_markup=_get_main_keyboard(),
+        reply_markup=_get_main_keyboard(user.id),
     )
 
 
@@ -263,14 +302,36 @@ async def cmd_help(message: types.Message) -> None:
         "💬 Популярные фразы\n"
         "😀 Топ эмодзи\n\n"
         "*Лимиты:*\n"
-        "• 1 бесплатный анализ в день\n"
-        "• Дополнительные — через /buy\n\n"
+        "• Анализы доступны после покупки за звёзды через /buy\n\n"
         "*Команды:*\n"
         "/start — начать\n"
         "/help — эта справка\n"
         "/buy — купить анализы",
         parse_mode="Markdown",
-        reply_markup=_get_main_keyboard(),
+        reply_markup=_get_main_keyboard(message.from_user.id),
+    )
+
+
+@router.message(Command("balance"))
+async def cmd_balance(message: types.Message) -> None:
+    """Показывает текущий платный баланс и статус premium пользователя."""
+    user = message.from_user
+    from db import check_user_access
+
+    status = check_user_access(user.id)
+
+    if status.is_premium:
+        premium_text = f"Да, Premium до {status.premium_until.strftime('%d.%m.%Y')}" if status.premium_until else "Да (безлимитный)"
+    else:
+        premium_text = "Нет"
+
+    await message.answer(
+        f"📋 Статус для пользователя {user.id} (@{user.username})\n\n"
+        f"💳 Платный баланс: {status.paid_balance}\n"
+        f"⭐ Premium: {premium_text}\n"
+        f"📅 Использовано сегодня: {status.daily_used}/{status.daily_limit}",
+        parse_mode="Markdown",
+        reply_markup=_get_main_keyboard(user.id),
     )
 
 
@@ -286,28 +347,160 @@ async def cmd_admin(message: types.Message) -> None:
 
     stats = get_stats()
 
-    # Формируем топ каналов (по подписчикам)
+    # Формируем топ каналов (по количеству анализов)
     top_channels_text = ""
     top_channels = get_top_channels(5)
     if top_channels:
         top_channels_text = "\n\n📺 *Топ-5 анализируемых каналов:*\n"
-        for i, (channel_key, title, subs) in enumerate(top_channels, 1):
-            if subs >= 1_000_000:
-                subs_str = f"{subs / 1_000_000:.1f}M"
-            elif subs >= 1_000:
-                subs_str = f"{subs / 1_000:.1f}K"
-            else:
-                subs_str = str(subs)
-            top_channels_text += f"{i}. {title} — {subs_str}\n"
+        for i, (channel_key, title, count) in enumerate(top_channels, 1):
+            top_channels_text += f"{i}. {title} — {count} анализов\n"
+
+    # Статистика по FloodWait за последние 24 часа
+    fw_stats = get_floodwait_stats(days=1)
 
     await message.answer(
         f"📈 *Статистика бота*\n\n"
         f"👥 Всего пользователей: {stats['total_users']}\n"
         f"✅ Активных (сделали анализ): {stats['active_users']}\n"
-        f"📊 Всего анализов: {stats['total_requests']}"
+        f"📊 Всего анализов: {stats['total_requests']}\n\n"
+        f"🚧 FloodWait за последние 24ч:\n"
+        f"• Событий: {fw_stats['total']}\n"
+        f"• Пользователей: {fw_stats['users']}"
         f"{top_channels_text}",
         parse_mode="Markdown",
     )
+
+
+@router.message(Command("clear_floodwait"))
+async def cmd_clear_floodwait(message: types.Message) -> None:
+    """Админ-команда: сброс in-memory FloodWait (обнуляет глобальную паузу)."""
+    user = message.from_user
+    if not is_admin(user.id):
+        await message.answer("⛔ Доступ запрещён.")
+        return
+
+    globals()['_main_cooldown_until'] = 0
+    globals()['_backup_cooldown_until'] = 0
+    globals()['_third_cooldown_until'] = 0
+    await message.answer("✅ Cooldown всех трёх аккаунтов сброшен (in-memory).")
+
+
+@router.message(Command("floodstatus"))
+async def cmd_floodstatus(message: types.Message) -> None:
+    """Админ-команда: показать статус всех клиентов и cooldown."""
+    user = message.from_user
+    if not is_admin(user.id):
+        await message.answer("⛔ Доступ запрещён.")
+        return
+
+    now = time.time()
+    lines = ["📊 *Статус клиентов:*\n"]
+
+    # Основной клиент
+    main_status = "✅ доступен"
+    if _user_client is None:
+        main_status = "❌ не инициализирован"
+    elif _main_cooldown_until > now:
+        remaining = int(_main_cooldown_until - now)
+        main_status = f"⏳ cooldown {remaining}s ({remaining // 60}m {remaining % 60}s)"
+    lines.append(f"1️⃣ Main: {main_status}")
+
+    # Backup клиент
+    backup_status = "✅ доступен"
+    if _backup_client is None:
+        backup_status = "❌ не инициализирован"
+    elif _backup_cooldown_until > now:
+        remaining = int(_backup_cooldown_until - now)
+        backup_status = f"⏳ cooldown {remaining}s ({remaining // 60}m {remaining % 60}s)"
+    lines.append(f"2️⃣ Backup: {backup_status}")
+
+    # Третий клиент
+    third_status = "✅ доступен"
+    if _third_client is None:
+        third_status = "❌ не инициализирован"
+    elif _third_cooldown_until > now:
+        remaining = int(_third_cooldown_until - now)
+        third_status = f"⏳ cooldown {remaining}s ({remaining // 60}m {remaining % 60}s)"
+    lines.append(f"3️⃣ Third: {third_status}")
+
+    # Общая доступность
+    available_count = sum([
+        _user_client is not None and _main_cooldown_until <= now,
+        _backup_client is not None and _backup_cooldown_until <= now,
+        _third_client is not None and _third_cooldown_until <= now,
+    ])
+    lines.append(f"\n🔢 Доступно клиентов: {available_count}/3")
+
+    await message.answer("\n".join(lines), parse_mode="Markdown")
+
+
+@router.message(Command("clear_floodwait_db"))
+async def cmd_clear_floodwait_db(message: types.Message) -> None:
+    """Админ-команда: удалить все записи floodwait_events из БД."""
+    user = message.from_user
+    if not is_admin(user.id):
+        await message.answer("⛔ Доступ запрещён.")
+        return
+
+    try:
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM floodwait_events")
+        total = cursor.fetchone()[0]
+        cursor.execute("DELETE FROM floodwait_events")
+        conn.commit()
+        conn.close()
+        await message.answer(f"✅ Удалено {total} записей floodwait_events из БД.")
+    except sqlite3.Error as e:
+        logger.error(f"Не удалось очистить floodwait_events: {e}")
+        await message.answer("❌ Ошибка при очистке БД. Смотрите логи сервиса.")
+
+
+@router.message(Command("send_pending"))
+async def cmd_send_pending(message: types.Message, bot: Bot) -> None:
+    """Админ-команда: отправить уведомление платящим пользователям о переповторных анализах."""
+    user = message.from_user
+    if not is_admin(user.id):
+        await message.answer("⛔ Доступ запрещён.")
+        return
+
+    paid_users = get_paid_user_ids()
+    
+    if not paid_users:
+        await message.answer("❌ Нет платящих пользователей.")
+        return
+
+    msg = await message.answer(f"📤 Отправляю уведомления {len(paid_users)} платящим пользователям...")
+
+    success_count = 0
+    for user_id in paid_users:
+        try:
+            status = check_user_access(user_id)
+            if status.paid_balance > 0 or status.is_premium:
+                pending = get_pending_analyses_for_user(user_id)
+                if pending:
+                    text = f"✅ У вас есть {len(pending)} незавершённых анализов:\n\n"
+                    for p in pending[:5]:  # Максимум 5
+                        text += f"• {p['channel_username']}\n"
+                    if len(pending) > 5:
+                        text += f"\n+ ещё {len(pending) - 5} анализов"
+                    text += "\n\nНапишите название канала для переанализа!"
+                    
+                    await bot.send_message(user_id, text)
+                    success_count += 1
+                else:
+                    # Просто уведомляем что бот работает
+                    await bot.send_message(
+                        user_id, 
+                        "✅ Бот восстановил работу! Ваши запросы готовы к обработке."
+                    )
+                    success_count += 1
+        except TelegramAPIError as e:
+            logger.warning(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
+            continue
+
+    await msg.edit_text(f"✅ Отправлено уведомлений: {success_count}/{len(paid_users)}")
 
 
 @router.message(Command("broadcast"))
@@ -348,7 +541,7 @@ async def cmd_broadcast(message: types.Message, bot: Bot) -> None:
         try:
             await bot.send_message(uid, text)
             sent += 1
-        except Exception:
+        except TelegramAPIError:
             failed += 1
 
     await status_msg.edit_text(
@@ -360,6 +553,58 @@ async def cmd_broadcast(message: types.Message, bot: Bot) -> None:
     )
 
     logger.info(f"Рассылка завершена: {sent} отправлено, {failed} ошибок")
+
+
+@router.message(Command("broadcast_paid"))
+async def cmd_broadcast_paid(message: types.Message, bot: Bot) -> None:
+    """Обработчик команды /broadcast_paid — рассылка пользователям с балансом."""
+    user = message.from_user
+
+    if not is_admin(user.id):
+        logger.warning(f"Попытка рассылки от пользователя {user.id}")
+        await message.answer("⛔ Доступ запрещён.")
+        return
+
+    # Извлекаем текст после команды
+    text = message.text.replace("/broadcast_paid", "", 1).strip()
+
+    if not text:
+        await message.answer(
+            "📢 *Рассылка платным пользователям*\n\n"
+            "Использование: `/broadcast_paid Текст сообщения`\n\n"
+            "Отправляет сообщение только тем, у кого paid\\_balance > 0",
+            parse_mode="Markdown",
+        )
+        return
+
+    user_ids = get_paid_user_ids()
+    total = len(user_ids)
+
+    if total == 0:
+        await message.answer("❌ Нет пользователей с балансом для рассылки.")
+        return
+
+    status_msg = await message.answer(f"📤 Начинаю рассылку {total} платным пользователям...")
+
+    sent = 0
+    failed = 0
+
+    for uid in user_ids:
+        try:
+            await bot.send_message(uid, text, parse_mode="Markdown")
+            sent += 1
+        except TelegramAPIError:
+            failed += 1
+
+    await status_msg.edit_text(
+        f"✅ *Рассылка платным завершена*\n\n"
+        f"📤 Отправлено: {sent}\n"
+        f"❌ Ошибок: {failed}\n"
+        f"👥 Всего платных: {total}",
+        parse_mode="Markdown",
+    )
+
+    logger.info(f"Рассылка платным завершена: {sent} отправлено, {failed} ошибок")
 
 
 @router.message(Command("buy"))
@@ -381,9 +626,7 @@ async def cmd_buy(message: types.Message) -> None:
         else:
             status_text = "⭐ У вас безлимитный доступ\n\n"
     else:
-        remaining_free = max(0, status.daily_limit - status.daily_used)
         status_text = (
-            f"📊 Бесплатных сегодня: {remaining_free}/{status.daily_limit}\n"
             f"💰 Платный баланс: {status.paid_balance} анализов\n\n"
         )
 
@@ -405,6 +648,8 @@ async def handle_buy_button(message: types.Message) -> None:
 @router.callback_query(F.data == "buy_pack_3")
 async def callback_buy_pack_3(callback: types.CallbackQuery) -> None:
     """Обработчик покупки пакета 3 анализов."""
+    user = callback.from_user
+    logger.info(f"Пользователь {user.id} (@{user.username}) нажал купить 3 анализа")
     await callback.answer()
 
     await callback.message.answer_invoice(
@@ -419,6 +664,8 @@ async def callback_buy_pack_3(callback: types.CallbackQuery) -> None:
 @router.callback_query(F.data == "buy_pack_10")
 async def callback_buy_pack_10(callback: types.CallbackQuery) -> None:
     """Обработчик покупки пакета 10 анализов."""
+    user = callback.from_user
+    logger.info(f"Пользователь {user.id} (@{user.username}) нажал купить 10 анализов")
     await callback.answer()
 
     await callback.message.answer_invoice(
@@ -430,23 +677,27 @@ async def callback_buy_pack_10(callback: types.CallbackQuery) -> None:
     )
 
 
-@router.callback_query(F.data == "buy_weekly")
-async def callback_buy_weekly(callback: types.CallbackQuery) -> None:
-    """Обработчик покупки недельного безлимита."""
+@router.callback_query(F.data == "buy_pack_50")
+async def callback_buy_pack_50(callback: types.CallbackQuery) -> None:
+    """Обработчик покупки пакета 50 анализов."""
+    user = callback.from_user
+    logger.info(f"Пользователь {user.id} (@{user.username}) нажал купить 50 анализов")
     await callback.answer()
 
     await callback.message.answer_invoice(
-        title="Безлимит на неделю",
-        description="Неограниченное количество анализов на 7 дней",
-        payload="weekly_unlimited",
+        title="Пакет 50 анализов",
+        description="50 дополнительных анализов каналов",
+        payload="pack_50",
         currency="XTR",  # Telegram Stars
-        prices=[LabeledPrice(label="Безлимит 7 дней", amount=PACK_WEEKLY_PRICE)],
+        prices=[LabeledPrice(label="50 анализов", amount=PACK_50_PRICE)],
     )
 
 
 @router.callback_query(F.data == "donate")
 async def callback_donate(callback: types.CallbackQuery) -> None:
     """Обработчик доната."""
+    user = callback.from_user
+    logger.info(f"Пользователь {user.id} (@{user.username}) нажал донат")
     await callback.answer()
 
     await callback.message.answer_invoice(
@@ -471,6 +722,9 @@ async def handle_successful_payment(message: Message) -> None:
     payment = message.successful_payment
     payload = payment.invoice_payload
 
+    # Гарантируем что пользователь есть в БД перед добавлением баланса
+    register_user(user.id, user.username)
+
     logger.info(f"Успешный платёж от {user.id}: {payload}, {payment.total_amount} Stars")
 
     if payload == "pack_3":
@@ -489,11 +743,11 @@ async def handle_successful_payment(message: Message) -> None:
             "Отправьте юзернейм канала для анализа.",
             parse_mode="Markdown",
         )
-    elif payload == "weekly_unlimited":
-        set_premium(user.id, 7)
+    elif payload == "pack_50":
+        add_paid_balance(user.id, 50)
         await message.answer(
             "✅ *Спасибо за покупку!*\n\n"
-            "Вам активирован безлимитный доступ на 7 дней.\n"
+            "На ваш баланс добавлено 50 анализов.\n"
             "Отправьте юзернейм канала для анализа.",
             parse_mode="Markdown",
         )
@@ -509,6 +763,43 @@ async def handle_successful_payment(message: Message) -> None:
 async def handle_help_button(message: types.Message) -> None:
     """Обработчик кнопки помощи."""
     await cmd_help(message)
+
+
+@router.message(F.text == "📊 Админка")
+async def handle_admin_button(message: types.Message) -> None:
+    """Обработчик кнопки админки."""
+    await cmd_admin(message)
+
+
+@router.message(F.text == "📺 Топ каналов")
+async def handle_top_channels_button(message: types.Message) -> None:
+    """Обработчик кнопки топ каналов (по подписчикам)."""
+    user = message.from_user
+    if not is_admin(user.id):
+        return
+
+    top_channels = get_top_channels_by_subscribers(10)
+
+    if not top_channels:
+        await message.answer(
+            "📺 *Топ каналов по подписчикам*\n\n"
+            "Пока нет данных о подписчиках.\n"
+            "Данные появятся после новых анализов.",
+            parse_mode="Markdown",
+        )
+        return
+
+    text = "📺 *Топ каналов по подписчикам:*\n\n"
+    for i, (channel_key, title, subs) in enumerate(top_channels, 1):
+        if subs >= 1_000_000:
+            subs_str = f"{subs / 1_000_000:.1f}M"
+        elif subs >= 1_000:
+            subs_str = f"{subs / 1_000:.1f}K"
+        else:
+            subs_str = str(subs)
+        text += f"{i}. @{channel_key} — {subs_str}\n   _{title}_\n"
+
+    await message.answer(text, parse_mode="Markdown")
 
 
 @router.message(F.text)
@@ -557,8 +848,8 @@ async def _perform_analysis(message: types.Message, channel: str | int) -> None:
     access = check_user_access(user.id)
     if not access.can_analyze:
         await message.answer(
-            "❌ *Твои бесплатные анализы закончились!*\n\n"
-            "Чтобы продолжить, купи ещё анализы за звёзды ⭐",
+            "❌ *Нет доступных анализов.*\n\n"
+            "Чтобы продолжить, купи анализы за звёзды ⭐",
             parse_mode="Markdown",
             reply_markup=_get_buy_keyboard(),
         )
@@ -574,15 +865,39 @@ async def _perform_analysis(message: types.Message, channel: str | int) -> None:
 
     # Обновляем время последнего запроса
     _update_rate_limit(user.id)
+    now = time.time()
+
+    # Проверяем, есть ли хоть один доступный клиент (не в cooldown)
+    main_available = _main_cooldown_until <= now
+    backup_available = _backup_client is not None and _backup_cooldown_until <= now
+    third_available = _third_client is not None and _third_cooldown_until <= now
+
+    if not (main_available or backup_available or third_available):
+        # Все клиенты в cooldown
+        log_floodwait_event(user.id, str(channel), "all_cooldown_active")
+        await message.answer(
+            "⏳ *Все аккаунты временно ограничены (FloodWait).* \n\n"
+            "Попробуйте позже.",
+            parse_mode="Markdown",
+        )
+        return
 
     # Проверяем очередь
     semaphore = _get_semaphore()
 
     # Если семафор занят — сообщаем о загруженности с расчётом времени
-    global _queue_position
     user_in_queue = False
     if semaphore.locked():
-        _queue_position += 1
+        # Если очередь уже большая — не ставим в ожидание, чтобы не долбить Telegram
+        if _queue_position >= MAX_QUEUE_WAITERS:
+            log_floodwait_event(user.id, str(channel), "queue_full")
+            await message.answer(
+                "⏳ *Бот сейчас перегружен.*\n\n"
+                "Попробуйте позже.",
+                parse_mode="Markdown",
+            )
+            return
+        globals()['_queue_position'] = globals()['_queue_position'] + 1
         user_in_queue = True
         wait_minutes = (_queue_position * AVERAGE_ANALYSIS_TIME) // 60 + 1
         await message.answer(
@@ -595,49 +910,81 @@ async def _perform_analysis(message: types.Message, channel: str | int) -> None:
     status_msg = await message.answer("🛸 Извлекаю смыслы... Подождите минутку")
 
     async with semaphore:
+        # Пересчитываем доступность клиентов (могло измениться пока ждали в очереди)
+        now = time.time()
+        main_available = _main_cooldown_until <= now
+        backup_available = _backup_client is not None and _backup_cooldown_until <= now
+        third_available = _third_client is not None and _third_cooldown_until <= now
+
+        if not (main_available or backup_available or third_available):
+            log_floodwait_event(user.id, str(channel), "all_cooldown_active_inner")
+            await message.answer(
+                "⏳ *Все аккаунты временно ограничены (FloodWait).* \n\n"
+                "Попробуйте позже.",
+                parse_mode="Markdown",
+            )
+            await status_msg.delete()
+            return
+
         # Уменьшаем счётчик очереди
         if user_in_queue and _queue_position > 0:
-            _queue_position -= 1
+            globals()['_queue_position'] = globals()['_queue_position'] - 1
 
         # Уведомляем пользователя что его очередь подошла (если ждал)
         try:
-            await status_msg.edit_text("🚀 Начинаю анализ канала...")
-        except Exception:
+            await status_msg.edit_text("🚀 Начинаю анализ канала...\n\n⏳ Пожалуйста, подождите 1-2 минуты")
+        except TelegramBadRequest:
             pass
 
         try:
-            # Telethon поддерживает как username (str), так и chat_id (int)
-            # Пробуем основной клиент, при FloodWait переключаемся на резервный
-            try:
-                result = await analyze_channel(_user_client, channel)
-            except FloodWaitError as e:
-                # Уведомляем админа о FloodWait
-                await notify_admin_flood(e.seconds, str(channel))
+            # Пробуем клиенты по очереди, пропуская те что в cooldown
+            result = None
+            floodwait_info = []  # Собираем инфо о FloodWait для уведомления админа
 
-                if _backup_client is not None:
-                    logger.warning(f"FloodWait {e.seconds}s на основном клиенте, пробую резервный")
-                    await status_msg.edit_text("🔄 Переключаюсь на резервный канал...")
-                    try:
-                        result = await analyze_channel(_backup_client, channel)
-                    except FloodWaitError as e2:
-                        # Оба клиента заблокированы
-                        await notify_admin_flood(e2.seconds, f"{channel} (backup)")
-                        await message.answer(
-                            "⏳ *Telegram временно ограничил скорость.*\n\n"
-                            "Попробуй через 15 минут.",
-                            parse_mode="Markdown"
-                        )
-                        await status_msg.delete()
-                        return
-                else:
-                    logger.error(f"FloodWait {e.seconds}s, резервный клиент недоступен")
-                    await message.answer(
-                        "⏳ *Telegram временно ограничил скорость.*\n\n"
-                        "Попробуй через 15 минут.",
-                        parse_mode="Markdown"
-                    )
-                    await status_msg.delete()
-                    return
+            # 1. Основной клиент
+            if main_available:
+                try:
+                    result = await analyze_channel(_user_client, channel)
+                except FloodWaitError as e:
+                    globals()['_main_cooldown_until'] = time.time() + int(e.seconds) + 5
+                    floodwait_info.append(f"main: {int(e.seconds)}s")
+                    logger.warning(f"FloodWait {e.seconds}s на основном клиенте")
+
+            # 2. Backup клиент
+            if result is None and backup_available:
+                await status_msg.edit_text("🔄 Переключаюсь на резервный аккаунт...")
+                try:
+                    result = await analyze_channel(_backup_client, channel)
+                except FloodWaitError as e:
+                    globals()['_backup_cooldown_until'] = time.time() + int(e.seconds) + 5
+                    floodwait_info.append(f"backup: {int(e.seconds)}s")
+                    logger.warning(f"FloodWait {e.seconds}s на backup клиенте")
+
+            # 3. Третий клиент
+            if result is None and third_available:
+                await status_msg.edit_text("🔄 Переключаюсь на третий аккаунт...")
+                try:
+                    result = await analyze_channel(_third_client, channel)
+                except FloodWaitError as e:
+                    globals()['_third_cooldown_until'] = time.time() + int(e.seconds) + 5
+                    floodwait_info.append(f"third: {int(e.seconds)}s")
+                    logger.warning(f"FloodWait {e.seconds}s на третьем клиенте")
+
+            # Если все попытки провалились
+            if result is None and floodwait_info:
+                log_floodwait_event(user.id, str(channel), "floodwait_all_tried")
+                # Сохраняем в очередь для переанализа
+                channel_key = str(channel).lstrip('@').split('/')[-1].strip().lower()
+                add_pending_analysis(user.id, channel_key, str(channel))
+                
+                await notify_admin_flood(0, f"{channel} ({', '.join(floodwait_info)})")
+                await message.answer(
+                    "⏳ *Telegram временно ограничил скорость.*\n\n"
+                    "Попробуйте позже.",
+                    parse_mode="Markdown"
+                )
+                await status_msg.delete()
+                return
 
             if result is None or result.cloud_path is None:
                 await message.answer("❌ Ошибка или канал пуст.")
@@ -696,6 +1043,9 @@ async def _perform_analysis(message: types.Message, channel: str | int) -> None:
             # Записываем в статистику каналов
             log_channel_analysis(str(channel), result.title, result.subscribers)
 
+            # Добавляем задержку после анализа для избежания флудвейта
+            await asyncio.sleep(DELAY_BETWEEN_ANALYSES)
+
             # Удаление временных файлов
             for path in result.get_all_paths():
                 try:
@@ -744,5 +1094,5 @@ async def _perform_analysis(message: types.Message, channel: str | int) -> None:
         finally:
             try:
                 await status_msg.delete()
-            except Exception:
+            except TelegramBadRequest:
                 pass

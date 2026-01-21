@@ -40,7 +40,8 @@
       "Bash(sshpass:*)",
       "Bash(rsync:*)",
       "Bash(source ~/.zshrc)",
-      "Bash(ssh:*)"
+      "Bash(ssh:*)",
+      "Bash(sqlite3:*)"
     ]
   }
 }

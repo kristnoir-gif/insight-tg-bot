@@ -28,8 +28,9 @@ else:
 API_ID: Final[int] = int(os.getenv("API_ID", "0"))
 API_HASH: Final[str] = os.getenv("API_HASH", "")
 BOT_TOKEN: Final[str] = os.getenv("BOT_TOKEN", "")
-SESSION_NAME: Final[str] = os.getenv("SESSION_NAME", "user_session")
-BACKUP_SESSION_NAME: Final[str] = os.getenv("BACKUP_SESSION_NAME", "ltdnt_session")
+SESSION_NAME: Final[str] = os.getenv("SESSION_NAME", "ltdnt_session")
+BACKUP_SESSION_NAME: Final[str] = os.getenv("BACKUP_SESSION_NAME", "211766470_telethon")
+THIRD_SESSION_NAME: Final[str] = os.getenv("THIRD_SESSION_NAME", "kristina_user")
 
 # --- Временная зона ---
 MOSCOW_TZ: Final[timezone] = timezone(timedelta(hours=3))
@@ -46,7 +47,8 @@ WATERMARK_TEXT: Final[str] = "@insight_tg_bot"
 WATERMARK_COLOR: Final[str] = "#752E53"
 
 # --- Анализ ---
-DEFAULT_MESSAGE_LIMIT: Final[int] = 500  # было 700, снижено для уменьшения нагрузки
+# Баланс между качеством и нагрузкой: 400 сообщений на анализ.
+DEFAULT_MESSAGE_LIMIT: Final[int] = 400  # было 300
 
 
 def validate_config() -> bool:

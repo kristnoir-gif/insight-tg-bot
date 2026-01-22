@@ -5,7 +5,10 @@ import os
 import logging
 import time
 import asyncio
+import json
+import urllib.parse
 from collections import defaultdict
+from pathlib import Path
 
 from aiogram import Router, types, F, Bot
 from aiogram.filters import Command
@@ -20,11 +23,14 @@ from aiogram.types import (
     LabeledPrice,
     PreCheckoutQuery,
     Message,
+    WebAppInfo,
 )
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
 
-from analyzer import analyze_channel, AnalysisError
+from analyzer import AnalysisError
+from client_pool import get_client_pool
+from metrics import record_analysis, record_floodwait, record_payment
 from db import (
     register_user,
     get_stats,
@@ -47,16 +53,12 @@ from db import (
     get_payment_stats,
     get_users_with_pending_and_balance,
     log_payment,
+    get_all_channels_for_admin,
     FREE_DAILY_LIMIT,
     DB_PATH,
 )
 
 logger = logging.getLogger(__name__)
-
-# Per-client cooldowns при FloodWait (каждый аккаунт независимо)
-_main_cooldown_until: float = 0.0  # unix time
-_backup_cooldown_until: float = 0.0
-_third_cooldown_until: float = 0.0
 
 # Режим приватного доступа (только для админа)
 PRIVATE_MODE = False
@@ -65,38 +67,25 @@ PRIVATE_MODE = False
 ALLOWED_USERS = {"ltdnt"}
 
 # Настройки платежей (Telegram Stars)
-PACK_3_PRICE = 20  # Stars за 3 анализа
-PACK_10_PRICE = 75  # Stars за 10 анализов
-PACK_50_PRICE = 250  # Stars за 50 анализов
+PACK_3_PRICE = 20   # Stars за 3 анализа (стартовый пакет)
+PACK_10_PRICE = 50  # Stars за 10 анализов (выгода: 5 звезд за анализ)
+PACK_30_PRICE = 100 # Stars за 30 анализов (самый выгодный: 3.3 звезды за анализ)
+PACK_50_PRICE = 250 # Stars за 50 анализов (для активных пользователей)
+SUPPORT_PRICE = 100 # Stars поддержка проекта
 
 # Rate limiting (защита от спама и флудвейта)
-RATE_LIMIT_SECONDS = 600  # Минимальный интервал между запросами (10 минут - избежание FloodWait)
+RATE_LIMIT_SECONDS = 300  # 5 минут между запросами (кэш снижает нагрузку)
 FLOODWAIT_RATE_LIMIT = 1800  # 30 минут если пользователь получил FloodWait
-DELAY_BETWEEN_ANALYSES = 30  # Задержка между анализами (в секундах)
 _user_last_request: dict[int, float] = defaultdict(float)
 _user_got_floodwait: dict[int, float] = {}  # Когда пользователь получил FloodWait
 
-# Очередь запросов (ограничение параллельных анализов)
-MAX_CONCURRENT_ANALYSES = 1  # 1 анализ для снижения нагрузки на API
-AVERAGE_ANALYSIS_TIME = 150  # Секунд на один анализ (для расчёта времени ожидания)
-MAX_QUEUE_WAITERS = 2  # максимум ожидающих в очереди, дальше просим попробовать позже
-_analysis_semaphore: asyncio.Semaphore | None = None
-_queue_position: int = 0  # Счётчик ожидающих в очереди
-_bot_instance: Bot | None = None  # Для отправки уведомлений из очереди
+_bot_instance: Bot | None = None  # Для отправки уведомлений
 
 
 def set_bot_instance(bot: Bot) -> None:
     """Устанавливает экземпляр бота для отправки уведомлений."""
     global _bot_instance
     _bot_instance = bot
-
-
-def _get_semaphore() -> asyncio.Semaphore:
-    """Возвращает или создаёт семафор для очереди."""
-    global _analysis_semaphore
-    if _analysis_semaphore is None:
-        _analysis_semaphore = asyncio.Semaphore(MAX_CONCURRENT_ANALYSES)
-    return _analysis_semaphore
 
 
 async def notify_admin_flood(wait_seconds: int, channel: str) -> None:
@@ -114,6 +103,23 @@ async def notify_admin_flood(wait_seconds: int, channel: str) -> None:
             )
         except TelegramAPIError as e:
             logger.error(f"Не удалось уведомить админа о FloodWait: {e}")
+
+
+async def notify_admin_paid_user_error(user_id: int, username: str, channel: str, error: str) -> None:
+    """Уведомляет админа об ошибке анализа платного пользователя."""
+    from db import ADMIN_ID
+    if _bot_instance:
+        try:
+            await _bot_instance.send_message(
+                ADMIN_ID,
+                f"⚠️ *Ошибка анализа платного пользователя*\n\n"
+                f"👤 Пользователь: {user_id} (@{username})\n"
+                f"📺 Канал: `{channel}`\n"
+                f"❌ Ошибка: {error[:100]}...",
+                parse_mode="Markdown"
+            )
+        except TelegramAPIError as e:
+            logger.error(f"Не удалось уведомить админа об ошибке платного пользователя: {e}")
 
 
 def _check_rate_limit(user_id: int) -> tuple[bool, int]:
@@ -193,43 +199,39 @@ def _get_emotional_tone(scream_index: float) -> str:
 
 router = Router()
 
-# Ссылки на Telegram-клиенты (устанавливаются при запуске)
-_user_client: TelegramClient | None = None
-_backup_client: TelegramClient | None = None
-_third_client: TelegramClient | None = None
-
-
-def set_user_client(client: TelegramClient) -> None:
-    """Устанавливает основной клиент Telegram для анализа."""
-    global _user_client
-    _user_client = client
-
-
-def set_backup_client(client: TelegramClient) -> None:
-    """Устанавливает резервный клиент Telegram для анализа."""
-    global _backup_client
-    _backup_client = client
-
-
-def set_third_client(client: TelegramClient) -> None:
-    """Устанавливает третий клиент Telegram для анализа."""
-    global _third_client
-    _third_client = client
-
 
 def _get_main_keyboard(user_id: int = 0) -> ReplyKeyboardMarkup:
     """Создаёт основную клавиатуру."""
+    from db import check_user_access
+    
+    # Проверяем статус пользователя
+    access = check_user_access(user_id)
+    is_paid = access.paid_balance > 0 or access.is_premium
+    
     keyboard = [
         [
             KeyboardButton(text="💎 Купить анализы"),
+            KeyboardButton(text="👥 Пригласить друга")
+        ],
+        [
+            KeyboardButton(text="💳 Баланс"),
             KeyboardButton(text="❓ Помощь")
         ]
     ]
+    
+    # Для бесплатных пользователей показываем кнопку Priority Access
+    if not is_paid and not is_admin(user_id):
+        keyboard.insert(0, [
+            KeyboardButton(text="⚡ Приоритетный доступ")
+        ])
+    
     # Добавляем кнопки админки для админов
     if is_admin(user_id):
         keyboard.append([
-            KeyboardButton(text="📊 Админка"),
-            KeyboardButton(text="📺 Топ каналов")
+            KeyboardButton(text="📋 Мои каналы")
+        ])
+        keyboard.append([
+            KeyboardButton(text="📊 Админка")
         ])
 
     return ReplyKeyboardMarkup(
@@ -251,14 +253,26 @@ def _get_buy_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text=f"📦 10 анализов — {PACK_10_PRICE} ⭐",
+                    text=f"💎 10 анализов — {PACK_10_PRICE} ⭐",
                     callback_data="buy_pack_10"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"🚀 30 анализов — {PACK_30_PRICE} ⭐",
+                    callback_data="buy_pack_30"
                 )
             ],
             [
                 InlineKeyboardButton(
                     text=f"🎁 50 анализов — {PACK_50_PRICE} ⭐",
                     callback_data="buy_pack_50"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"💎 Поддержать проект — {SUPPORT_PRICE} ⭐",
+                    callback_data="support"
                 )
             ],
             [
@@ -273,15 +287,50 @@ def _get_buy_keyboard() -> InlineKeyboardMarkup:
 
 @router.message(Command("start"))
 async def cmd_start(message: types.Message) -> None:
-    """Обработчик команды /start."""
+    """Обработчик команды /start с поддержкой реферальных ссылок."""
     if not await _check_access(message):
         return
 
     user = message.from_user
-    logger.info(f"Пользователь {user.id} запустил бота")
-
-    # Регистрируем пользователя в БД
-    register_user(user.id, user.username)
+    
+    # Извлекаем реферальный код из deep link (если есть)
+    referrer_id = None
+    if message.text and len(message.text.split()) > 1:
+        parts = message.text.split()
+        if len(parts) == 2 and parts[1].startswith('ref'):
+            try:
+                referrer_id = int(parts[1][3:])  # ref12345 -> 12345
+                if referrer_id == user.id:
+                    referrer_id = None  # Нельзя пригласить себя
+            except ValueError:
+                pass
+    
+    # Регистрируем пользователя (с реферером если есть)
+    is_new = register_user(user.id, user.username, referrer_id)
+    
+    if is_new and referrer_id:
+        # Уведомляем нового пользователя о бонусе
+        logger.info(f"Новый пользователь {user.id} пришел по реферальной ссылке от {referrer_id}")
+        await message.answer(
+            "🎁 *Бонус за приглашение!*\n\n"
+            "Вы получили +1 анализ за переход по реферальной ссылке!\n"
+            "Ваш друг тоже получил бонус 🎉",
+            parse_mode="Markdown"
+        )
+        
+        # Уведомляем реферера
+        try:
+            from main import bot
+            if bot:
+                await bot.send_message(
+                    referrer_id,
+                    f"🎉 *Новый реферал!*\n\n"
+                    f"@{user.username or 'пользователь'} присоединился по вашей ссылке!\n"
+                    f"Вы оба получили +1 анализ 🎁",
+                    parse_mode="Markdown"
+                )
+        except Exception as e:
+            logger.error(f"Не удалось уведомить реферера {referrer_id}: {e}")
 
     await message.answer(
         "📊 *Добро пожаловать в Insight Bot!*\n\n"
@@ -298,7 +347,9 @@ async def cmd_start(message: types.Message) -> None:
         "👤 Упоминаемые личности\n"
         "💬 Популярные фразы\n"
         "😀 Топ эмодзи\n\n"
-        "💎 *Анализы доступны после покупки за звёзды*",
+        "🎁 *1 бесплатный анализ в день*\n"
+        "💎 Или купи анализы за звёзды для безлимита\n"
+        "👥 Приглашай друзей через /ref",
         parse_mode="Markdown",
         reply_markup=_get_main_keyboard(user.id),
     )
@@ -325,7 +376,8 @@ async def cmd_help(message: types.Message) -> None:
         "💬 Популярные фразы\n"
         "😀 Топ эмодзи\n\n"
         "*Лимиты:*\n"
-        "• Анализы доступны после покупки за звёзды через /buy\n\n"
+        "🎁 1 бесплатный анализ в день (когда нет очереди)\n"
+        "💎 Или купи анализы за звёзды для безлимита через /buy\n\n"
         "*Команды:*\n"
         "/start — начать\n"
         "/help — эта справка\n"
@@ -337,25 +389,69 @@ async def cmd_help(message: types.Message) -> None:
 
 @router.message(Command("balance"))
 async def cmd_balance(message: types.Message) -> None:
-    """Показывает текущий платный баланс и статус premium пользователя."""
+    """Показывает текущий платный баланс, статус premium и рефералов."""
     user = message.from_user
-    from db import check_user_access
+    from db import check_user_access, get_referral_stats
 
     status = check_user_access(user.id)
+    referrals = get_referral_stats(user.id)
 
     if status.is_premium:
         premium_text = f"Да, Premium до {status.premium_until.strftime('%d.%m.%Y')}" if status.premium_until else "Да (безлимитный)"
     else:
         premium_text = "Нет"
-
-    await message.answer(
-        f"📋 Статус для пользователя {user.id} (@{user.username})\n\n"
+    
+    text = (
+        f"📋 *Статус пользователя*\n\n"
         f"💳 Платный баланс: {status.paid_balance}\n"
         f"⭐ Premium: {premium_text}\n"
-        f"📅 Использовано сегодня: {status.daily_used}/{status.daily_limit}",
+        f"📅 Бесплатно сегодня: {status.daily_used}/{status.daily_limit}\n\n"
+        f"👥 *Рефералы:* {referrals['referral_count']}\n"
+    )
+    
+    if referrals['referrals']:
+        text += "\n*Последние приглашенные:*\n"
+        for ref in referrals['referrals'][:5]:
+            text += f"• @{ref['username']}\n"
+    
+    text += f"\n💡 Приглашай друзей через /ref"
+
+    await message.answer(
+        text,
         parse_mode="Markdown",
         reply_markup=_get_main_keyboard(user.id),
     )
+
+
+@router.message(Command("ref"))
+async def cmd_ref(message: types.Message) -> None:
+    """Показывает реферальную ссылку пользователя."""
+    user = message.from_user
+    from db import get_referral_stats
+    
+    bot_username = "insight_tg_bot"  # Имя вашего бота
+    ref_link = f"https://t.me/{bot_username}?start=ref{user.id}"
+    
+    stats = get_referral_stats(user.id)
+    
+    text = (
+        "👥 *Реферальная программа*\n\n"
+        "🎁 Приглашай друзей и получай бонусы!\n\n"
+        "*Ваши преимущества:*\n"
+        "• Вы получаете +1 анализ за каждого друга\n"
+        "• Ваш друг получает +1 анализ при регистрации\n\n"
+        f"*Ваша реферальная ссылка:*\n"
+        f"`{ref_link}`\n\n"
+        f"👥 Приглашено друзей: *{stats['referral_count']}*\n"
+        f"💎 Заработано анализов: *{stats['referral_count']}*"
+    )
+    
+    if stats['referrals']:
+        text += "\n\n*Последние приглашенные:*\n"
+        for ref in stats['referrals'][:5]:
+            text += f"• @{ref['username']}\n"
+    
+    await message.answer(text, parse_mode="Markdown")
 
 
 @router.message(Command("admin"))
@@ -369,17 +465,27 @@ async def cmd_admin(message: types.Message) -> None:
         return
 
     stats = get_stats()
-
-    # Формируем топ каналов (по количеству анализов)
-    top_channels_text = ""
-    top_channels = get_top_channels(5)
-    if top_channels:
-        top_channels_text = "\n\n📺 *Топ-5 анализируемых каналов:*\n"
-        for i, (channel_key, title, count) in enumerate(top_channels, 1):
-            top_channels_text += f"{i}. {title} — {count} анализов\n"
+    logger.info(f"📊 Admin stats: total_requests={stats['total_requests']}, active={stats['active_users']}, users={stats['total_users']}")
 
     # Статистика по FloodWait за последние 24 часа
     fw_stats = get_floodwait_stats(days=1)
+
+    # Inline-клавиатура с командами
+    admin_keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📋 Справка по командам", callback_data="admin_help")
+            ],
+            [
+                InlineKeyboardButton(text="💳 Платежи", callback_data="admin_payments"),
+                InlineKeyboardButton(text="👥 Платящие", callback_data="admin_paid_users")
+            ],
+            [
+                InlineKeyboardButton(text="🔄 Статус пула", callback_data="admin_floodstatus"),
+                InlineKeyboardButton(text="🧹 Очистить кэш", callback_data="admin_clear_cache")
+            ]
+        ]
+    )
 
     await message.answer(
         f"📈 *Статистика бота*\n\n"
@@ -388,73 +494,49 @@ async def cmd_admin(message: types.Message) -> None:
         f"📊 Всего анализов: {stats['total_requests']}\n\n"
         f"🚧 FloodWait за последние 24ч:\n"
         f"• Событий: {fw_stats['total']}\n"
-        f"• Пользователей: {fw_stats['users']}"
-        f"{top_channels_text}",
+        f"• Пользователей: {fw_stats['users']}",
         parse_mode="Markdown",
+        reply_markup=admin_keyboard,
     )
 
 
 @router.message(Command("clear_floodwait"))
 async def cmd_clear_floodwait(message: types.Message) -> None:
-    """Админ-команда: сброс in-memory FloodWait (обнуляет глобальную паузу)."""
+    """Админ-команда: сброс cooldown всех аккаунтов."""
     user = message.from_user
     if not is_admin(user.id):
         await message.answer("⛔ Доступ запрещён.")
         return
 
-    globals()['_main_cooldown_until'] = 0
-    globals()['_backup_cooldown_until'] = 0
-    globals()['_third_cooldown_until'] = 0
-    await message.answer("✅ Cooldown всех трёх аккаунтов сброшен (in-memory).")
+    pool = get_client_pool()
+    pool.clear_cooldowns()
+    await message.answer("✅ Cooldown всех аккаунтов сброшен.")
 
 
 @router.message(Command("floodstatus"))
 async def cmd_floodstatus(message: types.Message) -> None:
-    """Админ-команда: показать статус всех клиентов и cooldown."""
+    """Админ-команда: показать статус пула клиентов."""
     user = message.from_user
     if not is_admin(user.id):
         await message.answer("⛔ Доступ запрещён.")
         return
 
-    now = time.time()
-    lines = ["📊 *Статус клиентов:*\n"]
+    pool = get_client_pool()
+    await message.answer(pool.status_text(), parse_mode="Markdown")
 
-    # Основной клиент
-    main_status = "✅ доступен"
-    if _user_client is None:
-        main_status = "❌ не инициализирован"
-    elif _main_cooldown_until > now:
-        remaining = int(_main_cooldown_until - now)
-        main_status = f"⏳ cooldown {remaining}s ({remaining // 60}m {remaining % 60}s)"
-    lines.append(f"1️⃣ Main: {main_status}")
 
-    # Backup клиент
-    backup_status = "✅ доступен"
-    if _backup_client is None:
-        backup_status = "❌ не инициализирован"
-    elif _backup_cooldown_until > now:
-        remaining = int(_backup_cooldown_until - now)
-        backup_status = f"⏳ cooldown {remaining}s ({remaining // 60}m {remaining % 60}s)"
-    lines.append(f"2️⃣ Backup: {backup_status}")
+@router.message(Command("clear_cache"))
+async def cmd_clear_cache(message: types.Message) -> None:
+    """Админ-команда: очистить кэш результатов."""
+    user = message.from_user
+    if not is_admin(user.id):
+        await message.answer("⛔ Доступ запрещён.")
+        return
 
-    # Третий клиент
-    third_status = "✅ доступен"
-    if _third_client is None:
-        third_status = "❌ не инициализирован"
-    elif _third_cooldown_until > now:
-        remaining = int(_third_cooldown_until - now)
-        third_status = f"⏳ cooldown {remaining}s ({remaining // 60}m {remaining % 60}s)"
-    lines.append(f"3️⃣ Third: {third_status}")
-
-    # Общая доступность
-    available_count = sum([
-        _user_client is not None and _main_cooldown_until <= now,
-        _backup_client is not None and _backup_cooldown_until <= now,
-        _third_client is not None and _third_cooldown_until <= now,
-    ])
-    lines.append(f"\n🔢 Доступно клиентов: {available_count}/3")
-
-    await message.answer("\n".join(lines), parse_mode="Markdown")
+    pool = get_client_pool()
+    cache_stats = pool.status()["cache"]
+    pool.clear_cache()
+    await message.answer(f"✅ Кэш очищен. Было {cache_stats['valid']} записей.")
 
 
 @router.message(Command("clear_floodwait_db"))
@@ -547,9 +629,9 @@ async def cmd_paid_users(message: types.Message) -> None:
     
     text = (
         f"💰 *Статистика платежей:*\n\n"
-        f"👥 Платящих пользователей: {stats['total_users']}\n"
-        f"💳 Всего платежей: {stats['total_payments']}\n"
-        f"⭐ Всего звёзд: {stats['total_stars']}\n"
+        f"👥 Платящих пользователей: {stats.get('unique_users', 0)}\n"
+        f"💳 Всего платежей: {stats.get('total_payments', 0)}\n"
+        f"⭐ Всего звёзд: {stats.get('total_stars', 0)}\n"
     )
     
     if top_users:
@@ -561,6 +643,70 @@ async def cmd_paid_users(message: types.Message) -> None:
         text += f"\n⚠️ *ВНИМАНИЕ! Не получили результаты ({len(problematic)}):*\n"
         for u in problematic[:10]:
             text += f"• @{u['username']} — {u['pending_count']} незавершённых анализов (баланс: {u['balance']})\n"
+    
+    await message.answer(text, parse_mode="Markdown")
+
+
+@router.message(Command("payments"))
+async def cmd_payments(message: types.Message) -> None:
+    """Админ-команда: показать отчёт по платежам."""
+    user = message.from_user
+    if not is_admin(user.id):
+        await message.answer("⛔ Доступ запрещён.")
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # Платящие пользователи
+    cursor.execute("""
+        SELECT 
+            u.user_id,
+            u.username,
+            u.paid_balance,
+            COUNT(p.id) as payment_count,
+            SUM(p.stars) as total_stars
+        FROM users u
+        LEFT JOIN payments p ON u.user_id = p.user_id
+        WHERE u.paid_balance > 0 OR p.id IS NOT NULL
+        GROUP BY u.user_id
+        ORDER BY COALESCE(SUM(p.stars), 0) DESC
+    """)
+    
+    rows = cursor.fetchall()
+    
+    text = "💳 *ОТЧЁТ ПО ПЛАТЕЖАМ*\n\n"
+    
+    if not rows:
+        text += "❌ Нет данных о платежах\n"
+    else:
+        total_users = 0
+        total_stars = 0
+        
+        for uid, username, balance, payment_count, total in rows:
+            uname = f"@{username}" if username else "нет username"
+            balance = balance or 0
+            total = total or 0
+            
+            text += f"• {uname}: баланс={balance}, ⭐={total}\n"
+            
+            total_users += 1
+            total_stars += total
+        
+        text += f"\n*Итого:*\n"
+        text += f"👥 Платящих: {total_users}\n"
+        text += f"⭐ Звёзд: {total_stars}\n"
+    
+    # Проверяем таблицу payments
+    cursor.execute("SELECT COUNT(*) FROM payments")
+    payments_count = cursor.fetchone()[0]
+    
+    text += f"\n📋 Таблица payments: {payments_count} записей"
+    
+    if payments_count == 0:
+        text += "\n⚠️ ВНИМАНИЕ: Платежи не логируются!"
+    
+    conn.close()
     
     await message.answer(text, parse_mode="Markdown")
 
@@ -707,6 +853,18 @@ async def handle_buy_button(message: types.Message) -> None:
     await cmd_buy(message)
 
 
+@router.message(F.text == "👥 Пригласить друга")
+async def handle_ref_button(message: types.Message) -> None:
+    """Обработчик кнопки реферальной программы."""
+    await cmd_ref(message)
+
+
+@router.message(F.text == "💳 Баланс")
+async def handle_balance_button(message: types.Message) -> None:
+    """Обработчик кнопки баланса."""
+    await cmd_balance(message)
+
+
 @router.callback_query(F.data == "buy_pack_3")
 async def callback_buy_pack_3(callback: types.CallbackQuery) -> None:
     """Обработчик покупки пакета 3 анализов."""
@@ -732,10 +890,26 @@ async def callback_buy_pack_10(callback: types.CallbackQuery) -> None:
 
     await callback.message.answer_invoice(
         title="Пакет 10 анализов",
-        description="10 дополнительных анализов каналов",
+        description="10 анализов каналов (выгодно: 5⭐ за анализ)",
         payload="pack_10",
         currency="XTR",  # Telegram Stars
         prices=[LabeledPrice(label="10 анализов", amount=PACK_10_PRICE)],
+    )
+
+
+@router.callback_query(F.data == "buy_pack_30")
+async def callback_buy_pack_30(callback: types.CallbackQuery) -> None:
+    """Обработчик покупки пакета 30 анализов."""
+    user = callback.from_user
+    logger.info(f"Пользователь {user.id} (@{user.username}) нажал купить 30 анализов")
+    await callback.answer()
+
+    await callback.message.answer_invoice(
+        title="Пакет 30 анализов",
+        description="30 анализов каналов (самый выгодный: 3.3⭐ за анализ)",
+        payload="pack_30",
+        currency="XTR",  # Telegram Stars
+        prices=[LabeledPrice(label="30 анализов", amount=PACK_30_PRICE)],
     )
 
 
@@ -752,6 +926,22 @@ async def callback_buy_pack_50(callback: types.CallbackQuery) -> None:
         payload="pack_50",
         currency="XTR",  # Telegram Stars
         prices=[LabeledPrice(label="50 анализов", amount=PACK_50_PRICE)],
+    )
+
+
+@router.callback_query(F.data == "support")
+async def callback_support(callback: types.CallbackQuery) -> None:
+    """Обработчик поддержки проекта."""
+    user = callback.from_user
+    logger.info(f"Пользователь {user.id} (@{user.username}) нажал поддержать проект")
+    await callback.answer()
+
+    await callback.message.answer_invoice(
+        title="Поддержать проект",
+        description="Поддержите развитие бота и помогите сделать его еще лучше!",
+        payload="support",
+        currency="XTR",
+        prices=[LabeledPrice(label="Поддержка проекта", amount=SUPPORT_PRICE)],
     )
 
 
@@ -790,8 +980,10 @@ async def handle_successful_payment(message: Message) -> None:
     logger.info(f"Успешный платёж от {user.id}: {payload}, {payment.total_amount} Stars")
 
     if payload == "pack_3":
-        add_paid_balance(user.id, 3)
+        result = add_paid_balance(user.id, 3)
+        logger.info(f"💰 Платеж pack_3: user={user.id}, result={result}")
         log_payment(user.id, stars=payment.total_amount, payment_method="telegram_stars", notes="pack_3")
+        record_payment("pack_3", payment.total_amount)
         await message.answer(
             "✅ *Спасибо за покупку!*\n\n"
             "На ваш баланс добавлено 3 анализа.\n"
@@ -801,28 +993,78 @@ async def handle_successful_payment(message: Message) -> None:
     elif payload == "pack_10":
         add_paid_balance(user.id, 10)
         log_payment(user.id, stars=payment.total_amount, payment_method="telegram_stars", notes="pack_10")
+        record_payment("pack_10", payment.total_amount)
         await message.answer(
             "✅ *Спасибо за покупку!*\n\n"
             "На ваш баланс добавлено 10 анализов.\n"
             "Отправьте юзернейм канала для анализа.",
             parse_mode="Markdown",
         )
+    elif payload == "pack_30":
+        add_paid_balance(user.id, 30)
+        log_payment(user.id, stars=payment.total_amount, payment_method="telegram_stars", notes="pack_30")
+        record_payment("pack_30", payment.total_amount)
+        await message.answer(
+            "✅ *Спасибо за покупку!*\n\n"
+            "На ваш баланс добавлено 30 анализов.\n"
+            "Отправьте юзернейм канала для анализа.",
+            parse_mode="Markdown",
+        )
     elif payload == "pack_50":
         add_paid_balance(user.id, 50)
         log_payment(user.id, stars=payment.total_amount, payment_method="telegram_stars", notes="pack_50")
+        record_payment("pack_50", payment.total_amount)
         await message.answer(
             "✅ *Спасибо за покупку!*\n\n"
             "На ваш баланс добавлено 50 анализов.\n"
             "Отправьте юзернейм канала для анализа.",
             parse_mode="Markdown",
         )
+    elif payload == "support":
+        log_payment(user.id, stars=payment.total_amount, payment_method="telegram_stars", notes="support")
+        record_payment("support", payment.total_amount)
+        await message.answer(
+            "💎 *Огромное спасибо за поддержку проекта!*\n\n"
+            "Ваш вклад помогает развивать бот и делать его лучше.\n"
+            "Мы очень ценим вашу поддержку! 🙏",
+            parse_mode="Markdown",
+        )
     elif payload == "donate":
         log_payment(user.id, stars=payment.total_amount, payment_method="telegram_stars", notes="donate")
+        record_payment("donate", payment.total_amount)
         await message.answer(
             "❤️ *Спасибо за поддержку!*\n\n"
             "Ваш донат очень ценен для развития бота!",
             parse_mode="Markdown",
         )
+
+
+@router.message(F.text == "⚡ Приоритетный доступ")
+async def handle_priority_access_button(message: types.Message) -> None:
+    """Обработчик кнопки приоритетного доступа."""
+    await message.answer(
+        "⚡ *Приоритетный доступ*\n\n"
+        "🚀 Платные анализы обрабатываются через отдельные аккаунты с прокси\n"
+        "⏱ Моментальная обработка без очередей\n"
+        "🔄 Доступ к экспресс-анализу даже при перегрузке\n\n"
+        "💎 Купите анализы и получите приоритет!",
+        parse_mode="Markdown",
+        reply_markup=_get_buy_keyboard(),
+    )
+
+
+@router.message(F.text == "⚡ Приоритетный доступ")
+async def handle_priority_access_button(message: types.Message) -> None:
+    """Обработчик кнопки приоритетного доступа."""
+    await message.answer(
+        "⚡ *Приоритетный доступ*\n\n"
+        "🚀 Платные анализы обрабатываются через отдельные аккаунты с прокси\n"
+        "⏱ Моментальная обработка без очередей\n"
+        "🔄 Доступ к экспресс-анализу даже при перегрузке\n\n"
+        "💎 Купите анализы и получите приоритет!",
+        parse_mode="Markdown",
+        reply_markup=_get_buy_keyboard(),
+    )
 
 
 @router.message(F.text == "❓ Помощь")
@@ -831,41 +1073,257 @@ async def handle_help_button(message: types.Message) -> None:
     await cmd_help(message)
 
 
+@router.callback_query(F.data == "admin_help")
+async def callback_admin_help(callback: types.CallbackQuery) -> None:
+    """Обработчик кнопки 'Справка по командам'."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Доступ запрещён", show_alert=True)
+        return
+    
+    await callback.answer()
+    
+    help_text = (
+        "🔐 *АДМИНСКИЕ КОМАНДЫ*\n\n"
+        "📊 *Статистика и мониторинг:*\n"
+        "`/admin` — основная статистика\n"
+        "`/floodstatus` — статус пула клиентов\n"
+        "`/payments` — отчёт по платежам\n"
+        "`/paid_users` — детальная статистика\n\n"
+        "🛠️ *Управление ботом:*\n"
+        "`/clear_floodwait` — сброс cooldown\n"
+        "`/clear_cache` — очистка кэша\n"
+        "`/clear_floodwait_db` — очистка FloodWait БД\n\n"
+        "📢 *Рассылки:*\n"
+        "`/broadcast <текст>` — всем\n"
+        "`/broadcast_paid <текст>` — платящим\n"
+        "`/send_pending` — уведомление о незавершённых\n\n"
+        "💡 Используйте кнопки ниже для быстрого доступа"
+    )
+    
+    await callback.message.answer(help_text, parse_mode="Markdown")
+
+
+@router.callback_query(F.data == "admin_payments")
+async def callback_admin_payments(callback: types.CallbackQuery) -> None:
+    """Обработчик кнопки 'Платежи'."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Доступ запрещён", show_alert=True)
+        return
+    
+    await callback.answer()
+    
+    # Создаём временное сообщение для вызова cmd_payments
+    temp_message = callback.message
+    temp_message.from_user = callback.from_user
+    await cmd_payments(temp_message)
+
+
+@router.callback_query(F.data == "admin_paid_users")
+async def callback_admin_paid_users(callback: types.CallbackQuery) -> None:
+    """Обработчик кнопки 'Платящие пользователи'."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Доступ запрещён", show_alert=True)
+        return
+    
+    await callback.answer()
+    
+    temp_message = callback.message
+    temp_message.from_user = callback.from_user
+    await cmd_paid_users(temp_message)
+
+
+@router.callback_query(F.data == "admin_floodstatus")
+async def callback_admin_floodstatus(callback: types.CallbackQuery) -> None:
+    """Обработчик кнопки 'Статус пула'."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Доступ запрещён", show_alert=True)
+        return
+    
+    await callback.answer()
+    
+    pool = get_client_pool()
+    await callback.message.answer(pool.status_text(), parse_mode="Markdown")
+
+
+@router.callback_query(F.data == "admin_clear_cache")
+async def callback_admin_clear_cache(callback: types.CallbackQuery) -> None:
+    """Обработчик кнопки 'Очистить кэш'."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Доступ запрещён", show_alert=True)
+        return
+    
+    pool = get_client_pool()
+    cache_stats = pool.status()["cache"]
+    pool.clear_cache()
+    
+    await callback.answer(f"✅ Кэш очищен ({cache_stats['valid']} записей)", show_alert=True)
+
+
+async def show_channels_menu(message_or_query, page: int = 0):
+    """Показывает меню выбора каналов с пагинацией."""
+    channels = get_all_channels_for_admin()
+    
+    if not channels:
+        if isinstance(message_or_query, types.Message):
+            await message_or_query.answer("📭 Нет каналов в базе данных")
+        else:
+            await message_or_query.message.answer("📭 Нет каналов в базе данных")
+        return
+    
+    # Пагинация
+    items_per_page = 8
+    total_pages = (len(channels) + items_per_page - 1) // items_per_page
+    
+    if page < 0:
+        page = 0
+    elif page >= total_pages:
+        page = total_pages - 1
+    
+    start_idx = page * items_per_page
+    end_idx = start_idx + items_per_page
+    page_channels = channels[start_idx:end_idx]
+    
+    # Создаем клавиатуру
+    keyboard = []
+    
+    # Кнопки каналов (по 2 в ряд)
+    for i in range(0, len(page_channels), 2):
+        row = []
+        for j in range(2):
+            if i + j < len(page_channels):
+                ch = page_channels[i + j]
+                # Ограничиваем название до 20 символов
+                title = ch['title'][:18] + '..' if len(ch['title']) > 20 else ch['title']
+                row.append(InlineKeyboardButton(
+                    text=f"📺 {title}",
+                    callback_data=f"select_ch:{ch['channel_key']}"
+                ))
+        keyboard.append(row)
+    
+    # Навигация
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data=f"ch_page:{page - 1}"
+        ))
+    
+    nav_row.append(InlineKeyboardButton(
+        text=f"📄 {page + 1}/{total_pages}",
+        callback_data="ch_noop"
+    ))
+    
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton(
+            text="Вперед ➡️",
+            callback_data=f"ch_page:{page + 1}"
+        ))
+    
+    keyboard.append(nav_row)
+    
+    # Кнопка закрыть
+    keyboard.append([
+        InlineKeyboardButton(text="❌ Закрыть", callback_data="ch_close")
+    ])
+    
+    text = (
+        f"📋 *Выберите канал для анализа*\n\n"
+        f"Всего каналов: {len(channels)}\n"
+        f"Страница {page + 1} из {total_pages}"
+    )
+    
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    
+    # Если это первый вызов - отправляем новое сообщение
+    # Если callback - редактируем существующее
+    if isinstance(message_or_query, types.Message):
+        await message_or_query.answer(text, parse_mode="Markdown", reply_markup=reply_markup)
+    else:
+        # Это callback query
+        try:
+            await message_or_query.message.edit_text(text, parse_mode="Markdown", reply_markup=reply_markup)
+        except TelegramBadRequest:
+            # Если сообщение не изменилось, игнорируем ошибку
+            pass
+
+
+@router.callback_query(F.data.startswith("ch_page:"))
+async def callback_channels_page(query: types.CallbackQuery):
+    """Пагинация списка каналов."""
+    page = int(query.data.split(":")[1])
+    await show_channels_menu(query, page)
+    await query.answer()
+
+
+@router.callback_query(F.data.startswith("select_ch:"))
+async def callback_select_channel(query: types.CallbackQuery):
+    """Выбор канала для анализа."""
+    user = query.from_user
+    
+    if not is_admin(user.id):
+        await query.answer("⛔ Доступ запрещён", show_alert=True)
+        return
+    
+    channel_key = query.data.split(":", 1)[1]
+    
+    # Закрываем меню
+    try:
+        await query.message.delete()
+    except:
+        pass
+    
+    # Отправляем подтверждение
+    await query.message.answer(
+        f"✅ Выбран канал: `{channel_key}`\n\n"
+        "🔄 Запускаю анализ...",
+        parse_mode="Markdown"
+    )
+    
+    # Создаем временное сообщение для обработки
+    temp_message = types.Message(
+        message_id=query.message.message_id,
+        date=query.message.date,
+        chat=query.message.chat,
+        from_user=user,
+        text=channel_key
+    )
+    
+    # Запускаем анализ
+    await handle_msg(temp_message)
+    await query.answer()
+
+
+@router.callback_query(F.data == "ch_noop")
+async def callback_channels_noop(query: types.CallbackQuery):
+    """Пустой callback для кнопки страницы."""
+    await query.answer()
+
+
+@router.callback_query(F.data == "ch_close")
+async def callback_channels_close(query: types.CallbackQuery):
+    """Закрытие меню каналов."""
+    try:
+        await query.message.delete()
+    except:
+        pass
+    await query.answer("Меню закрыто")
+
+
+@router.message(F.text == "📋 Мои каналы")
+async def cmd_my_channels_button(message: types.Message):
+    """Обработчик кнопки выбора каналов."""
+    user = message.from_user
+    
+    if not is_admin(user.id):
+        return
+    
+    await show_channels_menu(message, page=0)
+
+
 @router.message(F.text == "📊 Админка")
 async def handle_admin_button(message: types.Message) -> None:
     """Обработчик кнопки админки."""
     await cmd_admin(message)
-
-
-@router.message(F.text == "📺 Топ каналов")
-async def handle_top_channels_button(message: types.Message) -> None:
-    """Обработчик кнопки топ каналов (по подписчикам)."""
-    user = message.from_user
-    if not is_admin(user.id):
-        return
-
-    top_channels = get_top_channels_by_subscribers(10)
-
-    if not top_channels:
-        await message.answer(
-            "📺 *Топ каналов по подписчикам*\n\n"
-            "Пока нет данных о подписчиках.\n"
-            "Данные появятся после новых анализов.",
-            parse_mode="Markdown",
-        )
-        return
-
-    text = "📺 *Топ каналов по подписчикам:*\n\n"
-    for i, (channel_key, title, subs) in enumerate(top_channels, 1):
-        if subs >= 1_000_000:
-            subs_str = f"{subs / 1_000_000:.1f}M"
-        elif subs >= 1_000:
-            subs_str = f"{subs / 1_000:.1f}K"
-        else:
-            subs_str = str(subs)
-        text += f"{i}. @{channel_key} — {subs_str}\n   _{title}_\n"
-
-    await message.answer(text, parse_mode="Markdown")
 
 
 @router.message(F.text)
@@ -882,44 +1340,86 @@ async def handle_msg(message: types.Message) -> None:
     # Регистрируем пользователя
     register_user(user.id, user.username)
 
-    # Извлекаем username из текста
-    username = message.text.replace('@', '').split('/')[-1].strip()
+    # Проверяем если это приватный канал (начинается с +)
+    is_private_channel = message.text.startswith('https://t.me/+')
+    
+    # Извлекаем username/hash из текста
+    if is_private_channel:
+        # Для приватных: https://t.me/+glL4HD1_l584ODAy
+        # Извлекаем hash после +
+        try:
+            username = message.text.split('https://t.me/+')[-1].split('?')[0].strip()
+            if not username or '/' in username:
+                await message.answer("❌ Неправильная ссылка на приватный канал. Используйте формат: https://t.me/+xxxxx")
+                return
+            username = '+' + username  # Добавляем + чтобы обозначить приватный канал
+        except Exception:
+            await message.answer("❌ Ошибка обработки ссылки на приватный канал.")
+            return
+    else:
+        # Для публичных: @channel_name или https://t.me/channel_name
+        username = message.text.replace('@', '').split('/')[-1].strip()
+        
+        if not username:
+            await message.answer("❌ Пожалуйста, укажите юзернейм или ссылку на канал.")
+            return
 
-    if not username:
-        await message.answer("❌ Пожалуйста, укажите юзернейм канала.")
-        return
-
-    logger.info(f"Запрос анализа канала: {username} от пользователя {user.id}")
+    logger.info(f"Запрос анализа канала: {username} от пользователя {user.id}" + (" (ПРИВАТНЫЙ КАНАЛ)" if is_private_channel else ""))
 
     # Выполняем анализ
-    await _perform_analysis(message, username)
+    await _perform_analysis(message, username, is_private_channel)
 
 
-async def _perform_analysis(message: types.Message, channel: str | int) -> None:
+async def _perform_analysis(message: types.Message, channel: str | int, is_private: bool = False) -> None:
     """
-    Выполняет анализ канала и отправляет результаты.
+    Выполняет анализ канала через ClientPool и отправляет результаты.
 
     Args:
         message: Сообщение пользователя.
         channel: Username канала (str) или chat_id (int).
     """
-    if _user_client is None:
-        await message.answer("❌ Бот не готов к работе. Попробуйте позже.")
-        logger.error("Telegram-клиент не инициализирован")
-        return
-
+    from db import was_analyzed_recently, get_cached_analysis
+    
+    pool = get_client_pool()
     user = message.from_user
+
+    # Проверяем что пул инициализирован
+    if pool.status()["total_accounts"] == 0:
+        await message.answer("❌ Бот не готов к работе. Попробуйте позже.")
+        logger.error("ClientPool пуст — нет аккаунтов")
+        return
 
     # Проверяем доступ пользователя
     access = check_user_access(user.id)
     if not access.can_analyze:
+        # Лимит исчерпан - предлагаем купить
+        remaining_hours = 24 - (datetime.now().hour if access.daily_used >= access.daily_limit else 0)
         await message.answer(
-            "❌ *Нет доступных анализов.*\n\n"
-            "Чтобы продолжить, купи анализы за звёзды ⭐",
+            "❌ *Дневной лимит исчерпан*\n\n"
+            f"Бесплатно: {access.daily_used}/{access.daily_limit} анализов в день\n"
+            f"⏰ Обновление через ~{remaining_hours}ч\n\n"
+            "💎 Или купи анализы за звёзды для моментального доступа:",
             parse_mode="Markdown",
             reply_markup=_get_buy_keyboard(),
         )
         return
+    
+    # Определяем тип пользователя для priority queue
+    is_paid_user = access.paid_balance > 0 or access.is_premium or is_admin(user.id)
+    is_free_user = not is_paid_user
+    
+    # SMART CACHING для бесплатных пользователей
+    if is_free_user:
+        channel_key = str(channel).lstrip('@').split('/')[-1].strip().lower()
+        was_recent, last_analyzed = was_analyzed_recently(channel_key, hours=6)
+        
+        if was_recent:
+            # Пытаемся получить кэшированные результаты
+            cached = get_cached_analysis(channel_key)
+            if cached:
+                logger.info(f"Free user {user.id} получил кэшированный анализ {channel_key} (last analyzed: {last_analyzed})")
+                # Используем существующий кэш ClientPool
+                # Сообщение об этом уже есть в логике pool.analyze с use_cache=True
 
     # Проверяем rate limit (защита от спама)
     can_proceed, wait_seconds = _check_rate_limit(user.id)
@@ -931,7 +1431,6 @@ async def _perform_analysis(message: types.Message, channel: str | int) -> None:
         else:
             time_str = f"{wait_seconds} сек"
 
-        # Проверяем был ли у пользователя FloodWait
         if user.id in _user_got_floodwait:
             await message.answer(
                 f"⏳ *Пожалуйста, подождите*\n\n"
@@ -941,280 +1440,179 @@ async def _perform_analysis(message: types.Message, channel: str | int) -> None:
                 parse_mode="Markdown",
             )
         else:
-            await message.answer(
-                f"⏳ Подождите {time_str} перед следующим запросом.",
-            )
+            await message.answer(f"⏳ Подождите {time_str} перед следующим запросом.")
         return
+    
+    # PRIORITY QUEUE: Проверка доступности аккаунтов для бесплатных пользователей
+    if is_free_user:
+        # Проверяем доступность Account #1 (main)
+        pool_status = pool.status()
+        main_account_available = False
+        
+        for acc_info in pool_status.get('accounts', []):
+            if acc_info.get('name') == 'main':  # Account #1 для free users
+                if acc_info.get('available') and not acc_info.get('busy'):
+                    main_account_available = True
+                break
+        
+        if not main_account_available:
+            # Account #1 в FloodWait - показываем сообщение
+            await message.answer(
+                "⏳ *Бесплатная очередь перегружена*\n\n"
+                "Основной аккаунт временно недоступен из-за ограничений Telegram.\n\n"
+                "🔄 Попробуйте позже или воспользуйтесь платным экспресс-анализом для моментальной обработки через приоритетные аккаунты!",
+                parse_mode="Markdown",
+                reply_markup=_get_buy_keyboard(),
+            )
+            log_floodwait_event(user.id, str(channel), "free_queue_overloaded")
+            return
 
     # Обновляем время последнего запроса
     _update_rate_limit(user.id)
-    now = time.time()
-
-    # Проверяем, есть ли хоть один доступный клиент (не в cooldown)
-    main_available = _main_cooldown_until <= now
-    backup_available = _backup_client is not None and _backup_cooldown_until <= now
-    third_available = _third_client is not None and _third_cooldown_until <= now
-
-    if not (main_available or backup_available or third_available):
-        # Все клиенты в cooldown
-        log_floodwait_event(user.id, str(channel), "all_cooldown_active")
-        _mark_user_floodwait(user.id)
-
-        # Рассчитываем минимальное время ожидания
-        min_cooldown = min(
-            _main_cooldown_until if _main_cooldown_until > now else float('inf'),
-            _backup_cooldown_until if _backup_cooldown_until > now else float('inf'),
-            _third_cooldown_until if _third_cooldown_until > now else float('inf'),
-        )
-        wait_minutes = max(1, int((min_cooldown - now) / 60) + 1)
-
-        await message.answer(
-            f"⏳ *Бот временно перегружен*\n\n"
-            f"Telegram ограничил количество запросов.\n\n"
-            f"⚠️ *Пожалуйста, НЕ отправляйте повторные запросы* — это только увеличит время ожидания!\n\n"
-            f"🕐 Попробуйте снова через ~{wait_minutes} мин.\n"
-            f"Ваш запрос `{channel}` сохранён.",
-            parse_mode="Markdown",
-        )
-        # Сохраняем pending
-        channel_key = str(channel).lstrip('@').split('/')[-1].strip().lower()
-        add_pending_analysis(user.id, channel_key, str(channel))
-        return
-
-    # Проверяем очередь
-    semaphore = _get_semaphore()
-
-    # Если семафор занят — сообщаем о загруженности с расчётом времени
-    user_in_queue = False
-    if semaphore.locked():
-        # Если очередь уже большая — не ставим в ожидание, чтобы не долбить Telegram
-        if _queue_position >= MAX_QUEUE_WAITERS:
-            log_floodwait_event(user.id, str(channel), "queue_full")
-            await message.answer(
-                "⏳ *Бот сейчас перегружен*\n\n"
-                "Слишком много запросов в очереди.\n\n"
-                "⚠️ *Не отправляйте повторные запросы* — это не ускорит обработку.\n\n"
-                "🕐 Попробуйте через 10-15 минут.",
-                parse_mode="Markdown",
-            )
-            return
-        globals()['_queue_position'] = globals()['_queue_position'] + 1
-        user_in_queue = True
-        wait_minutes = (_queue_position * AVERAGE_ANALYSIS_TIME) // 60 + 1
-        await message.answer(
-            f"⏳ *Бот сейчас загружен*\n\n"
-            f"Твой анализ придёт примерно через *{wait_minutes} мин*.\n"
-            f"Я пришлю уведомление, когда будет готово!",
-            parse_mode="Markdown"
-        )
 
     status_msg = await message.answer("🛸 Извлекаю смыслы... Подождите минутку")
 
-    async with semaphore:
-        # Пересчитываем доступность клиентов (могло измениться пока ждали в очереди)
-        now = time.time()
-        main_available = _main_cooldown_until <= now
-        backup_available = _backup_client is not None and _backup_cooldown_until <= now
-        third_available = _third_client is not None and _third_cooldown_until <= now
+    try:
+        # Выполняем анализ через ClientPool
+        result, error = await pool.analyze(channel, use_cache=True, user_id=user.id, is_private=is_private)
 
-        if not (main_available or backup_available or third_available):
-            log_floodwait_event(user.id, str(channel), "all_cooldown_active_inner")
-            _mark_user_floodwait(user.id)
+        if error:
+            # Обрабатываем разные типы ошибок
+            if error.startswith("all_cooldown:"):
+                wait_seconds = int(error.split(":")[1])
+                wait_minutes = max(1, wait_seconds // 60)
 
-            # Рассчитываем минимальное время ожидания
-            min_cooldown = min(
-                _main_cooldown_until if _main_cooldown_until > now else float('inf'),
-                _backup_cooldown_until if _backup_cooldown_until > now else float('inf'),
-                _third_cooldown_until if _third_cooldown_until > now else float('inf'),
-            )
-            wait_minutes = max(1, int((min_cooldown - now) / 60) + 1)
-
-            await message.answer(
-                f"⏳ *Бот временно перегружен*\n\n"
-                f"Telegram ограничил количество запросов.\n\n"
-                f"⚠️ *Пожалуйста, НЕ отправляйте повторные запросы* — это только увеличит время ожидания!\n\n"
-                f"🕐 Попробуйте снова через ~{wait_minutes} мин.\n"
-                f"Ваш запрос `{channel}` сохранён.",
-                parse_mode="Markdown",
-            )
-            # Сохраняем pending
-            channel_key = str(channel).lstrip('@').split('/')[-1].strip().lower()
-            add_pending_analysis(user.id, channel_key, str(channel))
-            await status_msg.delete()
-            return
-
-        # Уменьшаем счётчик очереди
-        if user_in_queue and _queue_position > 0:
-            globals()['_queue_position'] = globals()['_queue_position'] - 1
-
-        # Уведомляем пользователя что его очередь подошла (если ждал)
-        try:
-            await status_msg.edit_text("🚀 Начинаю анализ канала...\n\n⏳ Пожалуйста, подождите 1-2 минуты")
-        except TelegramBadRequest:
-            pass
-
-        try:
-            # Пробуем клиенты по очереди, пропуская те что в cooldown
-            result = None
-            floodwait_info = []  # Собираем инфо о FloodWait для уведомления админа
-
-            # 1. Основной клиент
-            if main_available:
-                try:
-                    result = await analyze_channel(_user_client, channel)
-                except FloodWaitError as e:
-                    globals()['_main_cooldown_until'] = time.time() + int(e.seconds) + 5
-                    floodwait_info.append(f"main: {int(e.seconds)}s")
-                    logger.warning(f"FloodWait {e.seconds}s на основном клиенте")
-
-            # 2. Backup клиент
-            if result is None and backup_available:
-                await status_msg.edit_text("🔄 Переключаюсь на резервный аккаунт...")
-                try:
-                    result = await analyze_channel(_backup_client, channel)
-                except FloodWaitError as e:
-                    globals()['_backup_cooldown_until'] = time.time() + int(e.seconds) + 5
-                    floodwait_info.append(f"backup: {int(e.seconds)}s")
-                    logger.warning(f"FloodWait {e.seconds}s на backup клиенте")
-
-            # 3. Третий клиент
-            if result is None and third_available:
-                await status_msg.edit_text("🔄 Переключаюсь на третий аккаунт...")
-                try:
-                    result = await analyze_channel(_third_client, channel)
-                except FloodWaitError as e:
-                    globals()['_third_cooldown_until'] = time.time() + int(e.seconds) + 5
-                    floodwait_info.append(f"third: {int(e.seconds)}s")
-                    logger.warning(f"FloodWait {e.seconds}s на третьем клиенте")
-
-            # Если все попытки провалились
-            if result is None and floodwait_info:
-                log_floodwait_event(user.id, str(channel), "floodwait_all_tried")
+                log_floodwait_event(user.id, str(channel), "all_cooldown")
+                record_analysis("floodwait")
                 _mark_user_floodwait(user.id)
 
-                # Сохраняем в очередь для переанализа
                 channel_key = str(channel).lstrip('@').split('/')[-1].strip().lower()
                 add_pending_analysis(user.id, channel_key, str(channel))
 
-                await notify_admin_flood(0, f"{channel} ({', '.join(floodwait_info)})")
                 await message.answer(
-                    f"⏳ *Telegram временно ограничил скорость*\n\n"
-                    f"✅ Ваш запрос `{channel}` сохранён!\n\n"
-                    f"⚠️ *Пожалуйста, НЕ отправляйте повторные запросы.*\n"
-                    f"Это только увеличивает время ожидания для всех.\n\n"
-                    f"🕐 Попробуйте снова через 15-30 минут.",
-                    parse_mode="Markdown"
-                )
-                await status_msg.delete()
-                return
-
-            if result is None or result.cloud_path is None:
-                await message.answer("❌ Ошибка или канал пуст.")
-                await status_msg.delete()
-                return
-
-            # Списываем анализ в зависимости от типа доступа
-            consume_analysis(user.id, access.reason)
-
-            # Получаем эмоциональный тон
-            emotional_tone = _get_emotional_tone(result.stats.scream_index)
-
-            # Формируем caption со статистикой
-            caption = (
-                f"📊 Канал: {result.title}\n\n"
-                f"📚 Уникальных слов: {result.stats.unique_count}\n"
-                f"📏 Средняя длина поста: {result.stats.avg_len} слов\n"
-                f"🎭 Эмоциональный тон: {emotional_tone}\n"
-                f"👤 Упомянуто личностей: {result.stats.unique_names_count} "
-                f"({result.stats.total_names_mentions} упоминаний)"
-            )
-
-            # Собираем медиагруппу
-            media = [InputMediaPhoto(media=FSInputFile(result.cloud_path), caption=caption)]
-
-            if result.graph_path:
-                media.append(InputMediaPhoto(media=FSInputFile(result.graph_path)))
-            if result.mats_path:
-                media.append(InputMediaPhoto(media=FSInputFile(result.mats_path)))
-            if result.positive_path:
-                media.append(InputMediaPhoto(media=FSInputFile(result.positive_path)))
-            if result.aggressive_path:
-                media.append(InputMediaPhoto(media=FSInputFile(result.aggressive_path)))
-            if result.weekday_path:
-                media.append(InputMediaPhoto(media=FSInputFile(result.weekday_path)))
-            if result.hour_path:
-                media.append(InputMediaPhoto(media=FSInputFile(result.hour_path)))
-            if result.names_path:
-                media.append(InputMediaPhoto(media=FSInputFile(result.names_path)))
-            if result.phrases_path:
-                media.append(InputMediaPhoto(media=FSInputFile(result.phrases_path)))
-            if result.dichotomy_path:
-                media.append(InputMediaPhoto(media=FSInputFile(result.dichotomy_path)))
-
-            await message.answer_media_group(media=media)
-
-            # Отдельное сообщение с эмодзи
-            if result.top_emojis:
-                emoji_text = f"🔥 Топ-20 эмодзи канала {result.title}\n\n"
-                for emo, count in result.top_emojis:
-                    emoji_text += f"{emo} x {count}\n"
-                await message.answer(emoji_text)
-
-            logger.info(f"Анализ канала {channel} успешно отправлен пользователю {user.id}")
-
-            # Записываем в статистику каналов
-            log_channel_analysis(str(channel), result.title, result.subscribers)
-
-            # Добавляем задержку после анализа для избежания флудвейта
-            await asyncio.sleep(DELAY_BETWEEN_ANALYSES)
-
-            # Удаление временных файлов
-            for path in result.get_all_paths():
-                try:
-                    if os.path.exists(path):
-                        os.remove(path)
-                except OSError as e:
-                    logger.warning(f"Не удалось удалить файл {path}: {e}")
-
-        except AnalysisError as e:
-            logger.error(f"Ошибка анализа: {e}")
-            error_str = str(e)
-            if "Could not find the input entity" in error_str:
-                await message.answer(
-                    "❌ *Не удалось найти канал*\n\n"
-                    "Попробуйте отправить *юзернейм* канала вместо выбора через кнопку.\n\n"
-                    "Например: `polozhnyak` или `t.me/polozhnyak`",
+                    f"⏳ *Бот временно перегружен*\n\n"
+                    f"Telegram ограничил количество запросов.\n\n"
+                    f"⚠️ *Пожалуйста, НЕ отправляйте повторные запросы*\n\n"
+                    f"🕐 Попробуйте снова через ~{wait_minutes} мин.\n"
+                    f"Ваш запрос `{channel}` сохранён.",
                     parse_mode="Markdown",
                 )
-            elif "Cannot find any entity" in error_str:
+                await status_msg.delete()
+                return
+
+            elif "Could not find" in error or "Cannot find" in error:
                 await message.answer(
                     "❌ *Канал не найден*\n\n"
                     "Проверьте правильность юзернейма.\n"
                     "Отправьте юзернейм без @ или ссылку на канал.",
                     parse_mode="Markdown",
                 )
-            elif "wait of" in error_str.lower() or "flood" in error_str.lower():
-                # FloodWaitError который не был пойман раньше
-                await message.answer(
-                    "⏳ *Telegram ограничил запросы*\n\n"
-                    "Слишком много запросов. Попробуйте через 5-10 минут.",
-                    parse_mode="Markdown",
-                )
-            elif "private" in error_str.lower() or "приватн" in error_str.lower():
-                await message.answer(
-                    "🔒 *Канал приватный*\n\n"
-                    "Бот может анализировать только публичные каналы.",
-                    parse_mode="Markdown",
-                )
+            elif "private" in error.lower() or "приватн" in error.lower():
+                if is_private:
+                    await message.answer(
+                        "🔒 *Нет доступа к приватному каналу*\n\n"
+                        "Возможные причины:\n"
+                        "• Неправильная ссылка-приглашение\n"
+                        "• Истекло время действия ссылки\n"
+                        "• Отсутствует доступ в канал\n\n"
+                        "Убедитесь, что ссылка-приглашение ещё действительна.",
+                        parse_mode="Markdown",
+                    )
+                else:
+                    await message.answer(
+                        "🔒 *Канал приватный*\n\n"
+                        "Бот может анализировать только публичные каналы или приватные через ссылку-приглашение.\n\n"
+                        "Отправьте ссылку вида: https://t.me/+xxxxx",
+                        parse_mode="Markdown",
+                    )
+            elif error == "empty_result":
+                await message.answer("❌ Канал пуст или недоступен.")
+                record_analysis("error")
             else:
-                await message.answer(f"❌ Ошибка анализа канала. Попробуйте позже.")
+                logger.error(f"❌ Ошибка анализа {channel} для user {user.id}: {error}")
+                
+                # Уведомляем админа если это платный пользователь
+                if access.reason == "paid" and access.paid_balance > 0:
+                    await notify_admin_paid_user_error(user.id, user.username or "unknown", str(channel), error)
+                
+                await message.answer("❌ Ошибка анализа канала. Попробуйте позже.")
+                record_analysis("error")
 
-        except Exception as e:
-            logger.exception(f"Неожиданная ошибка при анализе канала {channel}")
-            await message.answer("❌ Произошла ошибка. Попробуйте позже.")
+            await status_msg.delete()
+            return
 
-        finally:
+        if result is None or result.cloud_path is None:
+            await message.answer("❌ Ошибка или канал пуст.")
+            await status_msg.delete()
+            return
+
+        # Списываем анализ (только если не из кэша)
+        consume_analysis(user.id, access.reason)
+
+        # Получаем эмоциональный тон
+        emotional_tone = _get_emotional_tone(result.stats.scream_index)
+
+        # Формируем caption со статистикой
+        caption = (
+            f"📊 Канал: {result.title}\n\n"
+            f"📚 Уникальных слов: {result.stats.unique_count}\n"
+            f"📏 Средняя длина поста: {result.stats.avg_len} слов\n"
+            f"🎭 Эмоциональный тон: {emotional_tone}\n"
+            f"👤 Упомянуто личностей: {result.stats.unique_names_count} "
+            f"({result.stats.total_names_mentions} упоминаний)"
+        )
+
+        # Собираем медиагруппу
+        media = [InputMediaPhoto(media=FSInputFile(result.cloud_path), caption=caption)]
+
+        if result.graph_path:
+            media.append(InputMediaPhoto(media=FSInputFile(result.graph_path)))
+        if result.mats_path:
+            media.append(InputMediaPhoto(media=FSInputFile(result.mats_path)))
+        if result.positive_path:
+            media.append(InputMediaPhoto(media=FSInputFile(result.positive_path)))
+        if result.aggressive_path:
+            media.append(InputMediaPhoto(media=FSInputFile(result.aggressive_path)))
+        if result.weekday_path:
+            media.append(InputMediaPhoto(media=FSInputFile(result.weekday_path)))
+        if result.hour_path:
+            media.append(InputMediaPhoto(media=FSInputFile(result.hour_path)))
+        if result.names_path:
+            media.append(InputMediaPhoto(media=FSInputFile(result.names_path)))
+        if result.phrases_path:
+            media.append(InputMediaPhoto(media=FSInputFile(result.phrases_path)))
+        if result.dichotomy_path:
+            media.append(InputMediaPhoto(media=FSInputFile(result.dichotomy_path)))
+
+        await message.answer_media_group(media=media)
+
+        # Отдельное сообщение с эмодзи
+        if result.top_emojis:
+            emoji_text = f"🔥 Топ-20 эмодзи канала {result.title}\n\n"
+            for emo, count in result.top_emojis:
+                emoji_text += f"{emo} x {count}\n"
+            await message.answer(emoji_text)
+
+        logger.info(f"Анализ канала {channel} успешно отправлен пользователю {user.id}")
+        record_analysis("success")
+
+        # Записываем в статистику каналов
+        log_channel_analysis(str(channel), result.title, result.subscribers, analyzed_by=user.id)
+
+        # Удаление временных файлов (только если не кэшированный результат)
+        for path in result.get_all_paths():
             try:
-                await status_msg.delete()
-            except TelegramBadRequest:
-                pass
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError as e:
+                logger.warning(f"Не удалось удалить файл {path}: {e}")
+
+    except Exception as e:
+        logger.exception(f"Неожиданная ошибка при анализе канала {channel}")
+        await message.answer("❌ Произошла ошибка. Попробуйте позже.")
+
+    finally:
+        try:
+            await status_msg.delete()
+        except TelegramBadRequest:
+            pass

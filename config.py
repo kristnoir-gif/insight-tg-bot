@@ -29,8 +29,8 @@ API_ID: Final[int] = int(os.getenv("API_ID", "0"))
 API_HASH: Final[str] = os.getenv("API_HASH", "")
 BOT_TOKEN: Final[str] = os.getenv("BOT_TOKEN", "")
 SESSION_NAME: Final[str] = os.getenv("SESSION_NAME", "ltdnt_session")
-BACKUP_SESSION_NAME: Final[str] = os.getenv("BACKUP_SESSION_NAME", "211766470_telethon")
-THIRD_SESSION_NAME: Final[str] = os.getenv("THIRD_SESSION_NAME", "kristina_user")
+BACKUP_SESSION_NAME: Final[str] = os.getenv("BACKUP_SESSION_NAME", "kristina_user")
+THIRD_SESSION_NAME: Final[str] = os.getenv("THIRD_SESSION_NAME", "211766470_telethon")
 
 # --- Прокси для избежания FloodWait (опционально) ---
 # Формат: socks5://user:pass@host:port или socks5://host:port или http://host:port

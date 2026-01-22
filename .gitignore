@@ -58,3 +58,4 @@ users.db
 dist/
 build/
 *.egg-info/
+_archive/

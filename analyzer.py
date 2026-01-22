@@ -15,6 +15,7 @@ from time import time as time_now
 import numpy as np
 from telethon import TelegramClient
 from telethon.errors import UsernameNotOccupiedError, UsernameInvalidError, FloodWaitError
+from telethon.tl.functions.messages import ImportChatInviteRequest
 
 from config import MOSCOW_TZ, DEFAULT_MESSAGE_LIMIT
 
@@ -224,7 +225,8 @@ def _save_to_cache(channel_id: str, result: AnalysisResult) -> None:
 async def analyze_channel(
     client: TelegramClient,
     channel: str | int,
-    limit: int = DEFAULT_MESSAGE_LIMIT
+    limit: int = DEFAULT_MESSAGE_LIMIT,
+    is_private: bool = False
 ) -> AnalysisResult | None:
     """
     Анализирует Telegram-канал.
@@ -233,6 +235,7 @@ async def analyze_channel(
         client: Подключённый TelegramClient.
         channel: Username канала (str) или chat_id (int).
         limit: Максимальное количество сообщений для анализа.
+        is_private: Является ли канал приватным (требует присоединения).
 
     Returns:
         AnalysisResult с результатами или None при ошибке.
@@ -242,6 +245,22 @@ async def analyze_channel(
     """
     # Определяем channel_id для кэша
     channel_key = str(channel).lstrip('@').split('/')[-1].strip().lower()
+    
+    # Для приватных каналов - пытаемся присоединиться
+    if is_private:
+        try:
+            logger.info(f"Присоединение к приватному каналу: {channel}")
+            # channel содержит hash (например: +glL4HD1_l584ODAy)
+            # Используем ImportChatInviteRequest для присоединения
+            chat_hash = str(channel).lstrip('+').strip()
+            if chat_hash:
+                result = await client(ImportChatInviteRequest(hash=chat_hash))
+                logger.info(f"Успешно присоединены к приватному каналу: {result.chats[0].title if result.chats else 'Unknown'}")
+            else:
+                logger.warning(f"Неправильный формат приватного канала: {channel}")
+        except Exception as e:
+            logger.error(f"Ошибка присоединения к приватному каналу {channel}: {type(e).__name__}: {e}")
+            # Продолжаем - возможно уже присоединены или будет ошибка при получении entity
 
     # Проверяем кэш
     if _is_cache_valid(channel_key):
@@ -259,18 +278,27 @@ async def analyze_channel(
         # Получение данных канала с fallback
         entity = None
         try:
-            entity = await client.get_entity(channel)
+            if is_private:
+                # Для приватных каналов: после присоединения получаем entity по hash
+                # Сначала пытаемся получить через get_entity с hash
+                entity = await client.get_entity(channel)
+            else:
+                entity = await client.get_entity(channel)
         except ValueError as e:
             # Если не удалось найти по ID, пробуем как username
             if "Could not find the input entity" in str(e):
-                logger.warning(f"Канал {channel} не найден по ID, пробую как username")
-                # Очищаем от возможных префиксов
-                clean_channel = str(channel).lstrip('@').split('/')[-1].strip()
-                if clean_channel:
-                    try:
-                        entity = await client.get_entity(clean_channel)
-                    except (ValueError, UsernameNotOccupiedError, UsernameInvalidError):
-                        pass
+                if is_private:
+                    logger.warning(f"Приватный канал {channel} не найден после присоединения")
+                    raise AnalysisError(f"Нет доступа к приватному каналу или ссылка истекла")
+                else:
+                    logger.warning(f"Канал {channel} не найден по ID, пробую как username")
+                    # Очищаем от возможных префиксов
+                    clean_channel = str(channel).lstrip('@').split('/')[-1].strip()
+                    if clean_channel:
+                        try:
+                            entity = await client.get_entity(clean_channel)
+                        except (ValueError, UsernameNotOccupiedError, UsernameInvalidError):
+                            pass
             if entity is None:
                 raise
 

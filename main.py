@@ -14,6 +14,7 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramAPIError
 from telethon import TelegramClient
+from telethon.errors import AuthKeyDuplicatedError
 
 from config import (
     API_ID,
@@ -29,8 +30,10 @@ from config import (
     LOG_LEVEL,
     validate_config,
 )
-from handlers import router, set_user_client, set_backup_client, set_third_client, set_bot_instance
-from db import init_db, ADMIN_ID, get_db
+from handlers import router, set_bot_instance
+from client_pool import get_client_pool, init_client_pool
+from db import init_db, ADMIN_ID
+from metrics import setup_metrics_endpoint, init_metrics, update_account_metrics, update_cache_metrics
 import sqlite3
 
 
@@ -130,35 +133,58 @@ async def main() -> None:
     dp.include_router(router)
     set_bot_instance(bot)  # Для уведомлений из очереди
 
+    # Инициализация ClientPool с кэшированием на 30 минут
+    pool = init_client_pool(cache_ttl=1800)
+
     # Основной скрапер-клиент
     user_client = TelegramClient(SESSION_NAME, API_ID, API_HASH, proxy=PROXY_MAIN)
 
     # Резервный скрапер-клиент (опционально)
     backup_client = None
-    try:
-        backup_session_path = f"{BACKUP_SESSION_NAME}.session"
-        if os.path.exists(backup_session_path):
-            backup_client = TelegramClient(BACKUP_SESSION_NAME, API_ID, API_HASH, proxy=PROXY_BACKUP)
-            logger.info(f"Найдена резервная сессия: {backup_session_path}")
-    except OSError as e:
-        logger.warning(f"Не удалось инициализировать backup клиент: {e}")
+    # Backup сессия отключена (kristina_user требует интерактивного ввода)
+    backup_client = None
+    # try:
+    #     backup_session_path = f"{BACKUP_SESSION_NAME}.session"
+    #     if os.path.exists(backup_session_path):
+    #         backup_client = TelegramClient(BACKUP_SESSION_NAME, API_ID, API_HASH, proxy=PROXY_BACKUP)
+    #         logger.info(f"Найдена резервная сессия: {backup_session_path}")
+    # except OSError as e:
+    #     logger.warning(f"Не удалось инициализировать backup клиент: {e}")
 
-    # Третий скрапер-клиент (опционально)
+    # Третий скрапер-клиент отключен (конфликт с polling)
     third_client = None
-    try:
-        third_session_path = f"{THIRD_SESSION_NAME}.session"
-        if os.path.exists(third_session_path):
-            third_client = TelegramClient(THIRD_SESSION_NAME, API_ID, API_HASH, proxy=PROXY_THIRD)
-            logger.info(f"Найдена третья сессия: {third_session_path}")
-    except OSError as e:
-        logger.warning(f"Не удалось инициализировать третий клиент: {e}")
+    # try:
+    #     third_session_path = f"{THIRD_SESSION_NAME}.session"
+    #     if os.path.exists(third_session_path):
+    #         third_client = TelegramClient(THIRD_SESSION_NAME, API_ID, API_HASH, proxy=PROXY_THIRD)
+    #         logger.info(f"Найдена третья сессия: {third_session_path}")
+    # except OSError as e:
+    #     logger.warning(f"Не удалось инициализировать третий клиент: {e}")
 
     try:
         # Запуск основного Telegram-клиента
         if PROXY_MAIN:
             logger.info(f"Основной клиент: используется прокси {PROXY_MAIN}")
-        await user_client.start()
-        set_user_client(user_client)
+        try:
+            await user_client.start()
+        except AuthKeyDuplicatedError:
+            logger.error(f"❌ Сессия {SESSION_NAME} скомпрометирована (AuthKeyDuplicatedError)")
+            await notify_admin(
+                bot,
+                f"🚨 *Сессия скомпрометирована!*\n\n"
+                f"📁 Сессия: {SESSION_NAME}\n"
+                f"🕐 {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\n\n"
+                f"Сессия использовалась с двух разных IP одновременно.\n"
+                f"Удалите файл {SESSION_NAME}.session и создайте новую сессию."
+            )
+            # Удаляем скомпрометированный файл
+            session_file = f"{SESSION_NAME}.session"
+            if os.path.exists(session_file):
+                os.remove(session_file)
+                logger.info(f"Удален файл скомпрометированной сессии: {session_file}")
+            raise
+        pool.add_account("main", user_client)
+        logger.info("Основной клиент добавлен в пул")
 
         # Запуск backup клиента если есть (с задержкой для избежания блокировки SQLite)
         if backup_client:
@@ -167,8 +193,15 @@ async def main() -> None:
                 if PROXY_BACKUP:
                     logger.info(f"Backup клиент: используется прокси {PROXY_BACKUP}")
                 await backup_client.start()
-                set_backup_client(backup_client)
-                logger.info("Backup клиент запущен успешно")
+                pool.add_account("backup", backup_client)
+                logger.info("Backup клиент добавлен в пул")
+            except AuthKeyDuplicatedError:
+                logger.error(f"❌ Backup сессия {BACKUP_SESSION_NAME} скомпрометирована")
+                session_file = f"{BACKUP_SESSION_NAME}.session"
+                if os.path.exists(session_file):
+                    os.remove(session_file)
+                    logger.info(f"Удален файл скомпрометированной backup сессии: {session_file}")
+                backup_client = None
             except (ConnectionError, OSError, Exception) as e:
                 logger.warning(f"Не удалось запустить backup клиент: {e}")
                 backup_client = None
@@ -180,29 +213,49 @@ async def main() -> None:
                 if PROXY_THIRD:
                     logger.info(f"Третий клиент: используется прокси {PROXY_THIRD}")
                 await third_client.start()
-                set_third_client(third_client)
-                logger.info("Третий клиент запущен успешно")
+                pool.add_account("third", third_client)
+                logger.info("Третий клиент добавлен в пул")
+            except AuthKeyDuplicatedError:
+                logger.error(f"❌ Третья сессия {THIRD_SESSION_NAME} скомпрометирована")
+                session_file = f"{THIRD_SESSION_NAME}.session"
+                if os.path.exists(session_file):
+                    os.remove(session_file)
+                    logger.info(f"Удален файл скомпрометированной третьей сессии: {session_file}")
+                third_client = None
             except (ConnectionError, OSError, Exception) as e:
                 logger.warning(f"Не удалось запустить третий клиент: {e}")
                 third_client = None
 
-        logger.info("Бот успешно запущен")
+        logger.info(f"Бот успешно запущен. Пул: {pool.status()['total_accounts']} аккаунтов")
 
-        # Запускаем простой HTTP health endpoint в фоне
-        async def _start_health():
+        # Инициализируем метрики
+        init_metrics(bot_username="insight_tg_bot", version="2.0.0")
+
+        # Запускаем HTTP сервер с /health и /metrics
+        async def _start_http_server():
             app = web.Application()
 
             async def _health(request):
-                return web.json_response({"status": "ok"})
+                # Обновляем метрики при каждом запросе health
+                status = pool.status()
+                update_account_metrics(status['accounts'])
+                update_cache_metrics(status['cache'])
+                return web.json_response({
+                    "status": "ok",
+                    "accounts": status['available_accounts'],
+                    "cache": status['cache']['valid']
+                })
 
             app.router.add_get('/health', _health)
+            setup_metrics_endpoint(app)  # Добавляем /metrics
+
             runner = web.AppRunner(app)
             await runner.setup()
             site = web.TCPSite(runner, '0.0.0.0', 8080)
             await site.start()
-            logger.info("Health endpoint started on http://0.0.0.0:8080/health")
+            logger.info("HTTP server started: /health and /metrics on http://0.0.0.0:8080")
 
-        asyncio.create_task(_start_health())
+        asyncio.create_task(_start_http_server())
 
         # Запускаем фоновую задачу для автоматической обработки pending анализов
         asyncio.create_task(auto_process_pending_analyses(user_client, logger))

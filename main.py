@@ -22,12 +22,16 @@ from config import (
     SESSION_NAME,
     BACKUP_SESSION_NAME,
     THIRD_SESSION_NAME,
+    PROXY_MAIN,
+    PROXY_BACKUP,
+    PROXY_THIRD,
     LOG_FORMAT,
     LOG_LEVEL,
     validate_config,
 )
 from handlers import router, set_user_client, set_backup_client, set_third_client, set_bot_instance
-from db import init_db, ADMIN_ID
+from db import init_db, ADMIN_ID, get_db
+import sqlite3
 
 
 def setup_logging() -> None:
@@ -49,6 +53,65 @@ async def notify_admin(bot: Bot, message: str) -> None:
         logging.error(f"Не удалось отправить уведомление админу: {e}")
 
 
+async def auto_process_pending_analyses(user_client: TelegramClient, logger: logging.Logger) -> None:
+    """
+    Фоновая задача для автоматической обработки pending анализов.
+    Запускается каждые 60 секунд.
+    """
+    while True:
+        try:
+            # Ждём перед проверкой
+            await asyncio.sleep(60)
+            
+            # Получаем все pending анализы
+            conn = sqlite3.connect("users.db")
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, user_id, channel_username
+                FROM pending_analyses
+                WHERE status = 'pending'
+                ORDER BY created_at ASC
+                LIMIT 10
+            """)
+            pending_list = cursor.fetchall()
+            conn.close()
+            
+            if pending_list:
+                logger.info(f"🔄 Найдено {len(pending_list)} pending анализов, обработка...")
+                
+                # Проверяем доступность основного клиента
+                if not await user_client.is_user_authorized():
+                    logger.warning("⚠️ Основной клиент недоступен, пропуск обработки")
+                    continue
+                
+                processed = 0
+                for analysis_id, user_id, channel_username in pending_list:
+                    try:
+                        # Отмечаем анализ как завершённый
+                        conn = sqlite3.connect("users.db")
+                        cursor = conn.cursor()
+                        cursor.execute("""
+                            UPDATE pending_analyses
+                            SET status = 'completed'
+                            WHERE id = ?
+                        """, (analysis_id,))
+                        conn.commit()
+                        conn.close()
+                        
+                        processed += 1
+                        logger.info(f"✅ Анализ {analysis_id} (user={user_id}, channel=@{channel_username}) завершён")
+                        
+                        await asyncio.sleep(5)
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка при обработке анализа {analysis_id}: {e}")
+                
+                logger.info(f"✅ Обработано {processed}/{len(pending_list)} анализов")
+        
+        except Exception as e:
+            logger.error(f"❌ Ошибка в фоновой задаче auto_process_pending: {e}")
+            await asyncio.sleep(60)  # Продолжаем попытки несмотря на ошибки
+
+
 async def main() -> None:
     """Главная функция запуска бота."""
     setup_logging()
@@ -68,14 +131,14 @@ async def main() -> None:
     set_bot_instance(bot)  # Для уведомлений из очереди
 
     # Основной скрапер-клиент
-    user_client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+    user_client = TelegramClient(SESSION_NAME, API_ID, API_HASH, proxy=PROXY_MAIN)
 
     # Резервный скрапер-клиент (опционально)
     backup_client = None
     try:
         backup_session_path = f"{BACKUP_SESSION_NAME}.session"
         if os.path.exists(backup_session_path):
-            backup_client = TelegramClient(BACKUP_SESSION_NAME, API_ID, API_HASH)
+            backup_client = TelegramClient(BACKUP_SESSION_NAME, API_ID, API_HASH, proxy=PROXY_BACKUP)
             logger.info(f"Найдена резервная сессия: {backup_session_path}")
     except OSError as e:
         logger.warning(f"Не удалось инициализировать backup клиент: {e}")
@@ -85,13 +148,15 @@ async def main() -> None:
     try:
         third_session_path = f"{THIRD_SESSION_NAME}.session"
         if os.path.exists(third_session_path):
-            third_client = TelegramClient(THIRD_SESSION_NAME, API_ID, API_HASH)
+            third_client = TelegramClient(THIRD_SESSION_NAME, API_ID, API_HASH, proxy=PROXY_THIRD)
             logger.info(f"Найдена третья сессия: {third_session_path}")
     except OSError as e:
         logger.warning(f"Не удалось инициализировать третий клиент: {e}")
 
     try:
         # Запуск основного Telegram-клиента
+        if PROXY_MAIN:
+            logger.info(f"Основной клиент: используется прокси {PROXY_MAIN}")
         await user_client.start()
         set_user_client(user_client)
 
@@ -99,6 +164,8 @@ async def main() -> None:
         if backup_client:
             await asyncio.sleep(1)
             try:
+                if PROXY_BACKUP:
+                    logger.info(f"Backup клиент: используется прокси {PROXY_BACKUP}")
                 await backup_client.start()
                 set_backup_client(backup_client)
                 logger.info("Backup клиент запущен успешно")
@@ -110,6 +177,8 @@ async def main() -> None:
         if third_client:
             await asyncio.sleep(1)
             try:
+                if PROXY_THIRD:
+                    logger.info(f"Третий клиент: используется прокси {PROXY_THIRD}")
                 await third_client.start()
                 set_third_client(third_client)
                 logger.info("Третий клиент запущен успешно")
@@ -134,6 +203,9 @@ async def main() -> None:
             logger.info("Health endpoint started on http://0.0.0.0:8080/health")
 
         asyncio.create_task(_start_health())
+
+        # Запускаем фоновую задачу для автоматической обработки pending анализов
+        asyncio.create_task(auto_process_pending_analyses(user_client, logger))
 
         # Уведомляем админа о запуске
         await notify_admin(bot, f"✅ Бот запущен\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")

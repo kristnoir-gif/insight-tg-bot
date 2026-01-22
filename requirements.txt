@@ -1,6 +1,7 @@
 # Telegram
 aiogram>=3.0
 telethon>=1.36
+python-socks[asyncio]>=2.0  # Для прокси (socks5/socks4)
 
 # NLP
 nltk>=3.8

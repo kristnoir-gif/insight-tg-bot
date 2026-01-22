@@ -43,6 +43,10 @@ from db import (
     add_pending_analysis,
     get_pending_analyses_for_user,
     remove_pending_analysis,
+    get_top_paid_users,
+    get_payment_stats,
+    get_users_with_pending_and_balance,
+    log_payment,
     FREE_DAILY_LIMIT,
     DB_PATH,
 )
@@ -66,9 +70,11 @@ PACK_10_PRICE = 75  # Stars за 10 анализов
 PACK_50_PRICE = 250  # Stars за 50 анализов
 
 # Rate limiting (защита от спама и флудвейта)
-RATE_LIMIT_SECONDS = 180  # Минимальный интервал между запросами (увеличено до 3 минут)
-DELAY_BETWEEN_ANALYSES = 5  # Задержка между анализами (в секундах)
+RATE_LIMIT_SECONDS = 600  # Минимальный интервал между запросами (10 минут - избежание FloodWait)
+FLOODWAIT_RATE_LIMIT = 1800  # 30 минут если пользователь получил FloodWait
+DELAY_BETWEEN_ANALYSES = 30  # Задержка между анализами (в секундах)
 _user_last_request: dict[int, float] = defaultdict(float)
+_user_got_floodwait: dict[int, float] = {}  # Когда пользователь получил FloodWait
 
 # Очередь запросов (ограничение параллельных анализов)
 MAX_CONCURRENT_ANALYSES = 1  # 1 анализ для снижения нагрузки на API
@@ -121,6 +127,18 @@ def _check_rate_limit(user_id: int) -> tuple[bool, int]:
         return True, 0
 
     now = time.time()
+
+    # Если пользователь недавно получил FloodWait — увеличенный лимит
+    if user_id in _user_got_floodwait:
+        floodwait_time = _user_got_floodwait[user_id]
+        elapsed_since_fw = now - floodwait_time
+        if elapsed_since_fw < FLOODWAIT_RATE_LIMIT:
+            remaining = int(FLOODWAIT_RATE_LIMIT - elapsed_since_fw)
+            return False, remaining
+        else:
+            # Очищаем запись
+            del _user_got_floodwait[user_id]
+
     last_request = _user_last_request[user_id]
     elapsed = now - last_request
 
@@ -129,6 +147,11 @@ def _check_rate_limit(user_id: int) -> tuple[bool, int]:
         return False, remaining
 
     return True, 0
+
+
+def _mark_user_floodwait(user_id: int) -> None:
+    """Помечает что пользователь столкнулся с FloodWait."""
+    _user_got_floodwait[user_id] = time.time()
 
 
 def _update_rate_limit(user_id: int) -> None:
@@ -503,6 +526,45 @@ async def cmd_send_pending(message: types.Message, bot: Bot) -> None:
     await msg.edit_text(f"✅ Отправлено уведомлений: {success_count}/{len(paid_users)}")
 
 
+@router.message(Command("paid_users"))
+async def cmd_paid_users(message: types.Message) -> None:
+    """Админ-команда: показать платящих пользователей и тех кто не получил результаты."""
+    from db import get_top_paid_users, get_payment_stats, get_users_with_pending_and_balance
+    
+    user = message.from_user
+    if not is_admin(user.id):
+        await message.answer("⛔ Доступ запрещён.")
+        return
+
+    # Статистика платежей
+    stats = get_payment_stats()
+    
+    # Топ платящих
+    top_users = get_top_paid_users(10)
+    
+    # Пользователи с проблемами (оплатили но не получили)
+    problematic = get_users_with_pending_and_balance()
+    
+    text = (
+        f"💰 *Статистика платежей:*\n\n"
+        f"👥 Платящих пользователей: {stats['total_users']}\n"
+        f"💳 Всего платежей: {stats['total_payments']}\n"
+        f"⭐ Всего звёзд: {stats['total_stars']}\n"
+    )
+    
+    if top_users:
+        text += f"\n🏆 *Топ-5 платящих:*\n"
+        for i, u in enumerate(top_users[:5], 1):
+            text += f"{i}. @{u['username']} — {u['total_stars']}⭐ ({u['payment_count']} платежей)\n"
+    
+    if problematic:
+        text += f"\n⚠️ *ВНИМАНИЕ! Не получили результаты ({len(problematic)}):*\n"
+        for u in problematic[:10]:
+            text += f"• @{u['username']} — {u['pending_count']} незавершённых анализов (баланс: {u['balance']})\n"
+    
+    await message.answer(text, parse_mode="Markdown")
+
+
 @router.message(Command("broadcast"))
 async def cmd_broadcast(message: types.Message, bot: Bot) -> None:
     """Обработчик команды /broadcast — рассылка всем пользователям."""
@@ -729,6 +791,7 @@ async def handle_successful_payment(message: Message) -> None:
 
     if payload == "pack_3":
         add_paid_balance(user.id, 3)
+        log_payment(user.id, stars=payment.total_amount, payment_method="telegram_stars", notes="pack_3")
         await message.answer(
             "✅ *Спасибо за покупку!*\n\n"
             "На ваш баланс добавлено 3 анализа.\n"
@@ -737,6 +800,7 @@ async def handle_successful_payment(message: Message) -> None:
         )
     elif payload == "pack_10":
         add_paid_balance(user.id, 10)
+        log_payment(user.id, stars=payment.total_amount, payment_method="telegram_stars", notes="pack_10")
         await message.answer(
             "✅ *Спасибо за покупку!*\n\n"
             "На ваш баланс добавлено 10 анализов.\n"
@@ -745,6 +809,7 @@ async def handle_successful_payment(message: Message) -> None:
         )
     elif payload == "pack_50":
         add_paid_balance(user.id, 50)
+        log_payment(user.id, stars=payment.total_amount, payment_method="telegram_stars", notes="pack_50")
         await message.answer(
             "✅ *Спасибо за покупку!*\n\n"
             "На ваш баланс добавлено 50 анализов.\n"
@@ -752,6 +817,7 @@ async def handle_successful_payment(message: Message) -> None:
             parse_mode="Markdown",
         )
     elif payload == "donate":
+        log_payment(user.id, stars=payment.total_amount, payment_method="telegram_stars", notes="donate")
         await message.answer(
             "❤️ *Спасибо за поддержку!*\n\n"
             "Ваш донат очень ценен для развития бота!",
@@ -858,9 +924,26 @@ async def _perform_analysis(message: types.Message, channel: str | int) -> None:
     # Проверяем rate limit (защита от спама)
     can_proceed, wait_seconds = _check_rate_limit(user.id)
     if not can_proceed:
-        await message.answer(
-            f"⏳ Подождите {wait_seconds} сек. перед следующим запросом.",
-        )
+        wait_minutes = wait_seconds // 60
+        wait_sec_remainder = wait_seconds % 60
+        if wait_minutes > 0:
+            time_str = f"{wait_minutes} мин {wait_sec_remainder} сек"
+        else:
+            time_str = f"{wait_seconds} сек"
+
+        # Проверяем был ли у пользователя FloodWait
+        if user.id in _user_got_floodwait:
+            await message.answer(
+                f"⏳ *Пожалуйста, подождите*\n\n"
+                f"Ваш предыдущий запрос не удалось выполнить из-за ограничений Telegram.\n\n"
+                f"⚠️ Повторные запросы увеличивают время ожидания для всех!\n\n"
+                f"🕐 Попробуйте снова через {time_str}.",
+                parse_mode="Markdown",
+            )
+        else:
+            await message.answer(
+                f"⏳ Подождите {time_str} перед следующим запросом.",
+            )
         return
 
     # Обновляем время последнего запроса
@@ -875,11 +958,27 @@ async def _perform_analysis(message: types.Message, channel: str | int) -> None:
     if not (main_available or backup_available or third_available):
         # Все клиенты в cooldown
         log_floodwait_event(user.id, str(channel), "all_cooldown_active")
+        _mark_user_floodwait(user.id)
+
+        # Рассчитываем минимальное время ожидания
+        min_cooldown = min(
+            _main_cooldown_until if _main_cooldown_until > now else float('inf'),
+            _backup_cooldown_until if _backup_cooldown_until > now else float('inf'),
+            _third_cooldown_until if _third_cooldown_until > now else float('inf'),
+        )
+        wait_minutes = max(1, int((min_cooldown - now) / 60) + 1)
+
         await message.answer(
-            "⏳ *Все аккаунты временно ограничены (FloodWait).* \n\n"
-            "Попробуйте позже.",
+            f"⏳ *Бот временно перегружен*\n\n"
+            f"Telegram ограничил количество запросов.\n\n"
+            f"⚠️ *Пожалуйста, НЕ отправляйте повторные запросы* — это только увеличит время ожидания!\n\n"
+            f"🕐 Попробуйте снова через ~{wait_minutes} мин.\n"
+            f"Ваш запрос `{channel}` сохранён.",
             parse_mode="Markdown",
         )
+        # Сохраняем pending
+        channel_key = str(channel).lstrip('@').split('/')[-1].strip().lower()
+        add_pending_analysis(user.id, channel_key, str(channel))
         return
 
     # Проверяем очередь
@@ -892,8 +991,10 @@ async def _perform_analysis(message: types.Message, channel: str | int) -> None:
         if _queue_position >= MAX_QUEUE_WAITERS:
             log_floodwait_event(user.id, str(channel), "queue_full")
             await message.answer(
-                "⏳ *Бот сейчас перегружен.*\n\n"
-                "Попробуйте позже.",
+                "⏳ *Бот сейчас перегружен*\n\n"
+                "Слишком много запросов в очереди.\n\n"
+                "⚠️ *Не отправляйте повторные запросы* — это не ускорит обработку.\n\n"
+                "🕐 Попробуйте через 10-15 минут.",
                 parse_mode="Markdown",
             )
             return
@@ -918,11 +1019,27 @@ async def _perform_analysis(message: types.Message, channel: str | int) -> None:
 
         if not (main_available or backup_available or third_available):
             log_floodwait_event(user.id, str(channel), "all_cooldown_active_inner")
+            _mark_user_floodwait(user.id)
+
+            # Рассчитываем минимальное время ожидания
+            min_cooldown = min(
+                _main_cooldown_until if _main_cooldown_until > now else float('inf'),
+                _backup_cooldown_until if _backup_cooldown_until > now else float('inf'),
+                _third_cooldown_until if _third_cooldown_until > now else float('inf'),
+            )
+            wait_minutes = max(1, int((min_cooldown - now) / 60) + 1)
+
             await message.answer(
-                "⏳ *Все аккаунты временно ограничены (FloodWait).* \n\n"
-                "Попробуйте позже.",
+                f"⏳ *Бот временно перегружен*\n\n"
+                f"Telegram ограничил количество запросов.\n\n"
+                f"⚠️ *Пожалуйста, НЕ отправляйте повторные запросы* — это только увеличит время ожидания!\n\n"
+                f"🕐 Попробуйте снова через ~{wait_minutes} мин.\n"
+                f"Ваш запрос `{channel}` сохранён.",
                 parse_mode="Markdown",
             )
+            # Сохраняем pending
+            channel_key = str(channel).lstrip('@').split('/')[-1].strip().lower()
+            add_pending_analysis(user.id, channel_key, str(channel))
             await status_msg.delete()
             return
 
@@ -973,14 +1090,19 @@ async def _perform_analysis(message: types.Message, channel: str | int) -> None:
             # Если все попытки провалились
             if result is None and floodwait_info:
                 log_floodwait_event(user.id, str(channel), "floodwait_all_tried")
+                _mark_user_floodwait(user.id)
+
                 # Сохраняем в очередь для переанализа
                 channel_key = str(channel).lstrip('@').split('/')[-1].strip().lower()
                 add_pending_analysis(user.id, channel_key, str(channel))
-                
+
                 await notify_admin_flood(0, f"{channel} ({', '.join(floodwait_info)})")
                 await message.answer(
-                    "⏳ *Telegram временно ограничил скорость.*\n\n"
-                    "Попробуйте позже.",
+                    f"⏳ *Telegram временно ограничил скорость*\n\n"
+                    f"✅ Ваш запрос `{channel}` сохранён!\n\n"
+                    f"⚠️ *Пожалуйста, НЕ отправляйте повторные запросы.*\n"
+                    f"Это только увеличивает время ожидания для всех.\n\n"
+                    f"🕐 Попробуйте снова через 15-30 минут.",
                     parse_mode="Markdown"
                 )
                 await status_msg.delete()

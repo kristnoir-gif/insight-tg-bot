@@ -32,6 +32,99 @@ SESSION_NAME: Final[str] = os.getenv("SESSION_NAME", "ltdnt_session")
 BACKUP_SESSION_NAME: Final[str] = os.getenv("BACKUP_SESSION_NAME", "211766470_telethon")
 THIRD_SESSION_NAME: Final[str] = os.getenv("THIRD_SESSION_NAME", "kristina_user")
 
+# --- Прокси для избежания FloodWait (опционально) ---
+# Формат: socks5://user:pass@host:port или socks5://host:port или http://host:port
+# Оставьте пустым если прокси не нужен
+_PROXY_MAIN_STR: Final[str | None] = os.getenv("PROXY_MAIN")
+_PROXY_BACKUP_STR: Final[str | None] = os.getenv("PROXY_BACKUP")
+_PROXY_THIRD_STR: Final[str | None] = os.getenv("PROXY_THIRD")
+
+
+def _parse_proxy(proxy_str: str | None) -> dict | None:
+    """
+    Парсит строку прокси в формат для Telethon.
+
+    Формат: protocol://[user:pass@]host:port
+    Примеры:
+        socks5://1.2.3.4:1080
+        socks5://user:password@1.2.3.4:1080
+        http://1.2.3.4:8080
+
+    Returns:
+        dict для Telethon или None если прокси не задан
+    """
+    if not proxy_str:
+        return None
+
+    try:
+        # Убираем пробелы
+        proxy_str = proxy_str.strip()
+
+        # Определяем тип прокси
+        if proxy_str.startswith('socks5://'):
+            proxy_type = 'socks5'
+            rest = proxy_str[9:]
+        elif proxy_str.startswith('socks4://'):
+            proxy_type = 'socks4'
+            rest = proxy_str[9:]
+        elif proxy_str.startswith('http://'):
+            proxy_type = 'http'
+            rest = proxy_str[7:]
+        elif proxy_str.startswith('https://'):
+            proxy_type = 'http'
+            rest = proxy_str[8:]
+        else:
+            # Если нет протокола - считаем socks5
+            proxy_type = 'socks5'
+            rest = proxy_str
+
+        # Парсим user:pass@host:port или host:port
+        username = None
+        password = None
+
+        if '@' in rest:
+            auth, hostport = rest.rsplit('@', 1)
+            if ':' in auth:
+                username, password = auth.split(':', 1)
+            else:
+                username = auth
+        else:
+            hostport = rest
+
+        # Парсим host:port
+        if ':' in hostport:
+            host, port_str = hostport.rsplit(':', 1)
+            port = int(port_str)
+        else:
+            host = hostport
+            port = 1080 if proxy_type.startswith('socks') else 8080
+
+        result = {
+            'proxy_type': proxy_type,
+            'addr': host,
+            'port': port,
+        }
+
+        if username:
+            result['username'] = username
+        if password:
+            result['password'] = password
+
+        logging.info(f"Прокси настроен: {proxy_type}://{host}:{port}" +
+                    (f" (auth: {username})" if username else ""))
+
+        return result
+
+    except (ValueError, IndexError) as e:
+        logging.error(f"Ошибка парсинга прокси '{proxy_str}': {e}")
+        return None
+
+
+# Прокси для клиентов (в формате Telethon)
+PROXY_MAIN: Final[dict | None] = _parse_proxy(_PROXY_MAIN_STR)
+PROXY_BACKUP: Final[dict | None] = _parse_proxy(_PROXY_BACKUP_STR)
+PROXY_THIRD: Final[dict | None] = _parse_proxy(_PROXY_THIRD_STR)
+
 # --- Временная зона ---
 MOSCOW_TZ: Final[timezone] = timezone(timedelta(hours=3))
 

@@ -231,7 +231,7 @@ def _get_main_keyboard(user_id: int = 0) -> ReplyKeyboardMarkup:
     # Добавляем кнопки админки для админов
     if is_admin(user_id):
         keyboard.append([
-            KeyboardButton(text=" Админка")
+            KeyboardButton(text="📊 Админка")
         ])
 
     return ReplyKeyboardMarkup(

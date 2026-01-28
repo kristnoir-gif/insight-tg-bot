@@ -54,6 +54,12 @@ users.db
 *.pyo
 *.pyd
 
+# Данные/экспорты
+channel_stats.*
+*.db.bak
+*.db.backup_*
+tdata/
+
 # Distribution / packaging
 dist/
 build/

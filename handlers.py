@@ -6,8 +6,10 @@ import logging
 import time
 import asyncio
 import json
+import sqlite3
 import urllib.parse
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 
 from aiogram import Router, types, F, Bot
@@ -31,6 +33,7 @@ from telethon.errors import FloodWaitError
 from analyzer import AnalysisError
 from client_pool import get_client_pool
 from metrics import record_analysis, record_floodwait, record_payment
+from config import DEFAULT_MESSAGE_LIMIT, FREE_MESSAGE_LIMIT, ADMIN_MESSAGE_LIMIT
 from db import (
     register_user,
     get_stats,
@@ -74,8 +77,8 @@ PACK_50_PRICE = 250 # Stars за 50 анализов (для активных п
 SUPPORT_PRICE = 100 # Stars поддержка проекта
 
 # Rate limiting (защита от спама и флудвейта)
-RATE_LIMIT_SECONDS = 300  # 5 минут между запросами (кэш снижает нагрузку)
-FLOODWAIT_RATE_LIMIT = 1800  # 30 минут если пользователь получил FloodWait
+RATE_LIMIT_SECONDS = 600  # 10 минут между запросами (снижение FloodWait)
+FLOODWAIT_RATE_LIMIT = 3600  # 60 минут если пользователь получил FloodWait
 _user_last_request: dict[int, float] = defaultdict(float)
 _user_got_floodwait: dict[int, float] = {}  # Когда пользователь получил FloodWait
 
@@ -203,28 +206,27 @@ router = Router()
 def _get_main_keyboard(user_id: int = 0) -> ReplyKeyboardMarkup:
     """Создаёт основную клавиатуру."""
     from db import check_user_access
-    
+
     # Проверяем статус пользователя
     access = check_user_access(user_id)
     is_paid = access.paid_balance > 0 or access.is_premium
-    
+
     keyboard = [
         [
             KeyboardButton(text="💎 Купить анализы"),
-            KeyboardButton(text="👥 Пригласить друга")
+            KeyboardButton(text="💰 Баланс")
         ],
         [
-            KeyboardButton(text="💳 Баланс"),
             KeyboardButton(text="❓ Помощь")
         ]
     ]
-    
-    # Для бесплатных пользователей показываем кнопку Priority Access
+
+    # Для бесплатных пользователей показываем кнопку "Полный анализ"
     if not is_paid and not is_admin(user_id):
         keyboard.insert(0, [
-            KeyboardButton(text="⚡ Приоритетный доступ")
+            KeyboardButton(text="⚡ Полный анализ")
         ])
-    
+
     # Добавляем кнопки админки для админов
     if is_admin(user_id):
         keyboard.append([
@@ -242,43 +244,37 @@ def _get_main_keyboard(user_id: int = 0) -> ReplyKeyboardMarkup:
 
 
 def _get_buy_keyboard() -> InlineKeyboardMarkup:
-    """Создаёт inline-клавиатуру с вариантами покупки."""
+    """Создаёт inline-клавиатуру с вариантами покупки полных анализов."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"🎯 3 анализа — {PACK_3_PRICE} ⭐",
+                    text=f"🎯 3 полных анализа — {PACK_3_PRICE} ⭐",
                     callback_data="buy_pack_3"
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text=f"💎 10 анализов — {PACK_10_PRICE} ⭐",
+                    text=f"💎 10 полных анализов — {PACK_10_PRICE} ⭐",
                     callback_data="buy_pack_10"
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text=f"🚀 30 анализов — {PACK_30_PRICE} ⭐",
+                    text=f"🚀 30 полных анализов — {PACK_30_PRICE} ⭐",
                     callback_data="buy_pack_30"
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text=f"🎁 50 анализов — {PACK_50_PRICE} ⭐",
+                    text=f"👑 50 полных анализов — {PACK_50_PRICE} ⭐",
                     callback_data="buy_pack_50"
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text=f"💎 Поддержать проект — {SUPPORT_PRICE} ⭐",
+                    text=f"❤️ Поддержать проект — {SUPPORT_PRICE} ⭐",
                     callback_data="support"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="❤️ Мне нравится бот — 1 ⭐",
-                    callback_data="donate"
                 )
             ],
         ]
@@ -320,9 +316,8 @@ async def cmd_start(message: types.Message) -> None:
         
         # Уведомляем реферера
         try:
-            from main import bot
-            if bot:
-                await bot.send_message(
+            if _bot_instance:
+                await _bot_instance.send_message(
                     referrer_id,
                     f"🎉 *Новый реферал!*\n\n"
                     f"@{user.username or 'пользователь'} присоединился по вашей ссылке!\n"
@@ -336,20 +331,20 @@ async def cmd_start(message: types.Message) -> None:
         "📊 *Добро пожаловать в Insight Bot!*\n\n"
         "Я анализирую публичные Telegram-каналы и выворачиваю их смыслы наизнанку.\n\n"
         "*Как пользоваться:*\n"
-        "• Отправьте юзернейм: `polozhnyak`\n"
-        "• Или ссылку: `t.me/polozhnyak`\n\n"
-        "*Что вы получите:*\n"
+        "Отправьте юзернейм: `polozhnyak`\n"
+        "Или ссылку: `t.me/polozhnyak`\n\n"
+        "🆓 *Бесплатно:*\n"
         "📊 Облако ключевых слов\n"
-        "📈 Топ-15 слов канала\n"
-        "🎭 Анализ тональности\n"
+        "📈 Топ-15 слов канала\n\n"
+        "💎 *Полный анализ (за ⭐):*\n"
+        "🎭 Анализ тональности (позитив/агрессия)\n"
+        "🤬 Мат-облако\n"
         "🗓 Активность по дням недели\n"
         "🕐 Время публикаций\n"
         "👤 Упоминаемые личности\n"
         "💬 Популярные фразы\n"
         "😀 Топ эмодзи\n\n"
-        "🎁 *1 бесплатный анализ в день*\n"
-        "💎 Или купи анализы за звёзды для безлимита\n"
-        "👥 Приглашай друзей через /ref",
+        "Отправь юзернейм канала для анализа!",
         parse_mode="Markdown",
         reply_markup=_get_main_keyboard(user.id),
     )
@@ -364,24 +359,26 @@ async def cmd_help(message: types.Message) -> None:
     await message.answer(
         "📖 *Как пользоваться ботом*\n\n"
         "*Анализ канала:*\n"
-        "• Отправьте юзернейм: `polozhnyak`\n"
-        "• Или ссылку: `t.me/polozhnyak`\n\n"
-        "*Что вы получите:*\n"
+        "Отправьте юзернейм: `polozhnyak`\n"
+        "Или ссылку: `t.me/polozhnyak`\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "🆓 *Бесплатный анализ:*\n"
         "📊 Облако ключевых слов\n"
         "📈 Топ-15 слов канала\n"
-        "🎭 Анализ тональности (позитив/агрессия)\n"
-        "🗓 Активность по дням недели\n"
+        "📏 Базовая статистика\n\n"
+        "💎 *Полный анализ (за ⭐):*\n"
+        "Всё из бесплатного, плюс:\n"
+        "🎭 Анализ тональности\n"
+        "🤬 Мат-облако\n"
+        "🗓 Активность по дням\n"
         "🕐 Время публикаций\n"
         "👤 Упоминаемые личности\n"
         "💬 Популярные фразы\n"
-        "😀 Топ эмодзи\n\n"
-        "*Лимиты:*\n"
-        "🎁 1 бесплатный анализ в день (когда нет очереди)\n"
-        "💎 Или купи анализы за звёзды для безлимита через /buy\n\n"
+        "😀 Топ-20 эмодзи\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
         "*Команды:*\n"
-        "/start — начать\n"
-        "/help — эта справка\n"
-        "/buy — купить анализы",
+        "/buy — купить полные анализы\n"
+        "/balance — ваш баланс",
         parse_mode="Markdown",
         reply_markup=_get_main_keyboard(message.from_user.id),
     )
@@ -391,67 +388,31 @@ async def cmd_help(message: types.Message) -> None:
 async def cmd_balance(message: types.Message) -> None:
     """Показывает текущий платный баланс, статус premium и рефералов."""
     user = message.from_user
-    from db import check_user_access, get_referral_stats
+    from db import check_user_access
 
     status = check_user_access(user.id)
-    referrals = get_referral_stats(user.id)
 
     if status.is_premium:
-        premium_text = f"Да, Premium до {status.premium_until.strftime('%d.%m.%Y')}" if status.premium_until else "Да (безлимитный)"
+        premium_text = f"Да, до {status.premium_until.strftime('%d.%m.%Y')}" if status.premium_until else "Да (безлимитный)"
     else:
         premium_text = "Нет"
-    
+
     text = (
-        f"📋 *Статус пользователя*\n\n"
-        f"💳 Платный баланс: {status.paid_balance}\n"
-        f"⭐ Premium: {premium_text}\n"
-        f"📅 Бесплатно сегодня: {status.daily_used}/{status.daily_limit}\n\n"
-        f"👥 *Рефералы:* {referrals['referral_count']}\n"
+        f"📋 *Ваш баланс*\n\n"
+        f"💎 Полных анализов: *{status.paid_balance}*\n"
+        f"👑 Premium: {premium_text}\n"
     )
-    
-    if referrals['referrals']:
-        text += "\n*Последние приглашенные:*\n"
-        for ref in referrals['referrals'][:5]:
-            text += f"• @{ref['username']}\n"
-    
-    text += f"\n💡 Приглашай друзей через /ref"
+
+    if status.paid_balance > 0:
+        text += f"\n✨ Отправьте юзернейм канала для полного анализа!"
+    else:
+        text += f"\n💡 Купите анализы через /buy"
 
     await message.answer(
         text,
         parse_mode="Markdown",
         reply_markup=_get_main_keyboard(user.id),
     )
-
-
-@router.message(Command("ref"))
-async def cmd_ref(message: types.Message) -> None:
-    """Показывает реферальную ссылку пользователя."""
-    user = message.from_user
-    from db import get_referral_stats
-    
-    bot_username = "insight_tg_bot"  # Имя вашего бота
-    ref_link = f"https://t.me/{bot_username}?start=ref{user.id}"
-    
-    stats = get_referral_stats(user.id)
-    
-    text = (
-        "👥 *Реферальная программа*\n\n"
-        "🎁 Приглашай друзей и получай бонусы!\n\n"
-        "*Ваши преимущества:*\n"
-        "• Вы получаете +1 анализ за каждого друга\n"
-        "• Ваш друг получает +1 анализ при регистрации\n\n"
-        f"*Ваша реферальная ссылка:*\n"
-        f"`{ref_link}`\n\n"
-        f"👥 Приглашено друзей: *{stats['referral_count']}*\n"
-        f"💎 Заработано анализов: *{stats['referral_count']}*"
-    )
-    
-    if stats['referrals']:
-        text += "\n\n*Последние приглашенные:*\n"
-        for ref in stats['referrals'][:5]:
-            text += f"• @{ref['username']}\n"
-    
-    await message.answer(text, parse_mode="Markdown")
 
 
 @router.message(Command("admin"))
@@ -490,8 +451,9 @@ async def cmd_admin(message: types.Message) -> None:
     await message.answer(
         f"📈 *Статистика бота*\n\n"
         f"👥 Всего пользователей: {stats['total_users']}\n"
-        f"✅ Активных (сделали анализ): {stats['active_users']}\n"
-        f"📊 Всего анализов: {stats['total_requests']}\n\n"
+        f"✅ Активных (за 30 дней): {stats['active_users']}\n"
+        f"📊 Всего анализов: {stats['total_requests']}\n"
+        f"📋 Уникальных каналов: {stats.get('total_channels', 0)}\n\n"
         f"🚧 FloodWait за последние 24ч:\n"
         f"• Событий: {fw_stats['total']}\n"
         f"• Пользователей: {fw_stats['users']}",
@@ -548,7 +510,6 @@ async def cmd_clear_floodwait_db(message: types.Message) -> None:
         return
 
     try:
-        import sqlite3
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM floodwait_events")
@@ -830,18 +791,26 @@ async def cmd_buy(message: types.Message) -> None:
     status_text = ""
     if status.is_premium:
         if status.premium_until:
-            status_text = f"⭐ У вас Premium до {status.premium_until.strftime('%d.%m.%Y')}\n\n"
+            status_text = f"👑 У вас Premium до {status.premium_until.strftime('%d.%m.%Y')}\n\n"
         else:
-            status_text = "⭐ У вас безлимитный доступ\n\n"
+            status_text = "👑 У вас безлимитный доступ\n\n"
+    elif status.paid_balance > 0:
+        status_text = f"💎 Ваш баланс: {status.paid_balance} полных анализов\n\n"
     else:
-        status_text = (
-            f"💰 Платный баланс: {status.paid_balance} анализов\n\n"
-        )
+        status_text = ""
 
     await message.answer(
-        f"💎 *Покупка анализов*\n\n"
+        f"💎 *Полный анализ канала*\n\n"
         f"{status_text}"
-        f"Выберите подходящий пакет:",
+        f"*Что входит в полный анализ:*\n"
+        f"• Облако слов + топ-15\n"
+        f"• Анализ тональности\n"
+        f"• Мат-облако\n"
+        f"• Активность по дням/часам\n"
+        f"• Упоминаемые личности\n"
+        f"• Популярные фразы\n"
+        f"• Топ-20 эмодзи\n\n"
+        f"Выберите пакет:",
         parse_mode="Markdown",
         reply_markup=_get_buy_keyboard(),
     )
@@ -853,13 +822,7 @@ async def handle_buy_button(message: types.Message) -> None:
     await cmd_buy(message)
 
 
-@router.message(F.text == "👥 Пригласить друга")
-async def handle_ref_button(message: types.Message) -> None:
-    """Обработчик кнопки реферальной программы."""
-    await cmd_ref(message)
-
-
-@router.message(F.text == "💳 Баланс")
+@router.message(F.text == "💰 Баланс")
 async def handle_balance_button(message: types.Message) -> None:
     """Обработчик кнопки баланса."""
     await cmd_balance(message)
@@ -867,65 +830,65 @@ async def handle_balance_button(message: types.Message) -> None:
 
 @router.callback_query(F.data == "buy_pack_3")
 async def callback_buy_pack_3(callback: types.CallbackQuery) -> None:
-    """Обработчик покупки пакета 3 анализов."""
+    """Обработчик покупки пакета 3 полных анализов."""
     user = callback.from_user
-    logger.info(f"Пользователь {user.id} (@{user.username}) нажал купить 3 анализа")
+    logger.info(f"Пользователь {user.id} (@{user.username}) нажал купить 3 полных анализа")
     await callback.answer()
 
     await callback.message.answer_invoice(
-        title="3 анализа каналов",
-        description="Проанализируйте 3 любых Telegram-канала",
+        title="3 полных анализа",
+        description="Полный анализ 3 каналов: тональность, активность, личности, фразы, эмодзи",
         payload="pack_3",
-        currency="XTR",  # Telegram Stars
-        prices=[LabeledPrice(label="3 анализа", amount=PACK_3_PRICE)],
+        currency="XTR",
+        prices=[LabeledPrice(label="3 полных анализа", amount=PACK_3_PRICE)],
     )
 
 
 @router.callback_query(F.data == "buy_pack_10")
 async def callback_buy_pack_10(callback: types.CallbackQuery) -> None:
-    """Обработчик покупки пакета 10 анализов."""
+    """Обработчик покупки пакета 10 полных анализов."""
     user = callback.from_user
-    logger.info(f"Пользователь {user.id} (@{user.username}) нажал купить 10 анализов")
+    logger.info(f"Пользователь {user.id} (@{user.username}) нажал купить 10 полных анализов")
     await callback.answer()
 
     await callback.message.answer_invoice(
-        title="Пакет 10 анализов",
-        description="10 анализов каналов (выгодно: 5⭐ за анализ)",
+        title="10 полных анализов",
+        description="Полный анализ 10 каналов (выгодно: 5⭐ за анализ)",
         payload="pack_10",
-        currency="XTR",  # Telegram Stars
-        prices=[LabeledPrice(label="10 анализов", amount=PACK_10_PRICE)],
+        currency="XTR",
+        prices=[LabeledPrice(label="10 полных анализов", amount=PACK_10_PRICE)],
     )
 
 
 @router.callback_query(F.data == "buy_pack_30")
 async def callback_buy_pack_30(callback: types.CallbackQuery) -> None:
-    """Обработчик покупки пакета 30 анализов."""
+    """Обработчик покупки пакета 30 полных анализов."""
     user = callback.from_user
-    logger.info(f"Пользователь {user.id} (@{user.username}) нажал купить 30 анализов")
+    logger.info(f"Пользователь {user.id} (@{user.username}) нажал купить 30 полных анализов")
     await callback.answer()
 
     await callback.message.answer_invoice(
-        title="Пакет 30 анализов",
-        description="30 анализов каналов (самый выгодный: 3.3⭐ за анализ)",
+        title="30 полных анализов",
+        description="Полный анализ 30 каналов (лучшая цена: ~3.3⭐ за анализ)",
         payload="pack_30",
-        currency="XTR",  # Telegram Stars
-        prices=[LabeledPrice(label="30 анализов", amount=PACK_30_PRICE)],
+        currency="XTR",
+        prices=[LabeledPrice(label="30 полных анализов", amount=PACK_30_PRICE)],
     )
 
 
 @router.callback_query(F.data == "buy_pack_50")
 async def callback_buy_pack_50(callback: types.CallbackQuery) -> None:
-    """Обработчик покупки пакета 50 анализов."""
+    """Обработчик покупки пакета 50 полных анализов."""
     user = callback.from_user
-    logger.info(f"Пользователь {user.id} (@{user.username}) нажал купить 50 анализов")
+    logger.info(f"Пользователь {user.id} (@{user.username}) нажал купить 50 полных анализов")
     await callback.answer()
 
     await callback.message.answer_invoice(
-        title="Пакет 50 анализов",
-        description="50 дополнительных анализов каналов",
+        title="50 полных анализов",
+        description="Полный анализ 50 каналов для активных пользователей",
         payload="pack_50",
-        currency="XTR",  # Telegram Stars
-        prices=[LabeledPrice(label="50 анализов", amount=PACK_50_PRICE)],
+        currency="XTR",
+        prices=[LabeledPrice(label="50 полных анализов", amount=PACK_50_PRICE)],
     )
 
 
@@ -986,8 +949,14 @@ async def handle_successful_payment(message: Message) -> None:
         record_payment("pack_3", payment.total_amount)
         await message.answer(
             "✅ *Спасибо за покупку!*\n\n"
-            "На ваш баланс добавлено 3 анализа.\n"
-            "Отправьте юзернейм канала для анализа.",
+            "💎 На ваш баланс добавлено *3 полных анализа*.\n\n"
+            "Теперь вы получите:\n"
+            "• Облако слов + топ-15\n"
+            "• Анализ тональности\n"
+            "• Мат-облако\n"
+            "• Активность по дням/часам\n"
+            "• Личности, фразы, эмодзи\n\n"
+            "Отправьте юзернейм канала!",
             parse_mode="Markdown",
         )
     elif payload == "pack_10":
@@ -996,8 +965,8 @@ async def handle_successful_payment(message: Message) -> None:
         record_payment("pack_10", payment.total_amount)
         await message.answer(
             "✅ *Спасибо за покупку!*\n\n"
-            "На ваш баланс добавлено 10 анализов.\n"
-            "Отправьте юзернейм канала для анализа.",
+            "💎 На ваш баланс добавлено *10 полных анализов*.\n\n"
+            "Отправьте юзернейм канала для полного анализа!",
             parse_mode="Markdown",
         )
     elif payload == "pack_30":
@@ -1006,8 +975,8 @@ async def handle_successful_payment(message: Message) -> None:
         record_payment("pack_30", payment.total_amount)
         await message.answer(
             "✅ *Спасибо за покупку!*\n\n"
-            "На ваш баланс добавлено 30 анализов.\n"
-            "Отправьте юзернейм канала для анализа.",
+            "💎 На ваш баланс добавлено *30 полных анализов*.\n\n"
+            "Отправьте юзернейм канала для полного анализа!",
             parse_mode="Markdown",
         )
     elif payload == "pack_50":
@@ -1016,8 +985,8 @@ async def handle_successful_payment(message: Message) -> None:
         record_payment("pack_50", payment.total_amount)
         await message.answer(
             "✅ *Спасибо за покупку!*\n\n"
-            "На ваш баланс добавлено 50 анализов.\n"
-            "Отправьте юзернейм канала для анализа.",
+            "👑 На ваш баланс добавлено *50 полных анализов*.\n\n"
+            "Отправьте юзернейм канала для полного анализа!",
             parse_mode="Markdown",
         )
     elif payload == "support":
@@ -1039,29 +1008,24 @@ async def handle_successful_payment(message: Message) -> None:
         )
 
 
-@router.message(F.text == "⚡ Приоритетный доступ")
+@router.message(F.text == "⚡ Полный анализ")
 async def handle_priority_access_button(message: types.Message) -> None:
-    """Обработчик кнопки приоритетного доступа."""
+    """Обработчик кнопки полного анализа."""
     await message.answer(
-        "⚡ *Приоритетный доступ*\n\n"
-        "🚀 Платные анализы обрабатываются через отдельные аккаунты с прокси\n"
-        "⏱ Моментальная обработка без очередей\n"
-        "🔄 Доступ к экспресс-анализу даже при перегрузке\n\n"
-        "💎 Купите анализы и получите приоритет!",
-        parse_mode="Markdown",
-        reply_markup=_get_buy_keyboard(),
-    )
-
-
-@router.message(F.text == "⚡ Приоритетный доступ")
-async def handle_priority_access_button(message: types.Message) -> None:
-    """Обработчик кнопки приоритетного доступа."""
-    await message.answer(
-        "⚡ *Приоритетный доступ*\n\n"
-        "🚀 Платные анализы обрабатываются через отдельные аккаунты с прокси\n"
-        "⏱ Моментальная обработка без очередей\n"
-        "🔄 Доступ к экспресс-анализу даже при перегрузке\n\n"
-        "💎 Купите анализы и получите приоритет!",
+        "💎 *Полный анализ канала*\n\n"
+        "🆓 *Бесплатно вы получаете:*\n"
+        "• Облако ключевых слов\n"
+        "• Топ-15 слов\n\n"
+        "💎 *В полном анализе:*\n"
+        "• Всё из бесплатного\n"
+        "• Анализ тональности (позитив/негатив)\n"
+        "• Мат-облако\n"
+        "• Активность по дням недели\n"
+        "• Время публикаций\n"
+        "• Упоминаемые личности\n"
+        "• Популярные фразы\n"
+        "• Топ-20 эмодзи\n\n"
+        "Купите полные анализы:",
         parse_mode="Markdown",
         reply_markup=_get_buy_keyboard(),
     )
@@ -1124,12 +1088,34 @@ async def callback_admin_paid_users(callback: types.CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
-    
+
     await callback.answer()
-    
-    temp_message = callback.message
-    temp_message.from_user = callback.from_user
-    await cmd_paid_users(temp_message)
+
+    # Статистика платежей
+    stats = get_payment_stats()
+    top_users = get_top_paid_users(10)
+    problematic = get_users_with_pending_and_balance()
+
+    text = (
+        f"💰 *Статистика платежей:*\n\n"
+        f"👥 Платящих пользователей: {stats.get('unique_users', 0)}\n"
+        f"💳 Всего платежей: {stats.get('total_payments', 0)}\n"
+        f"⭐ Всего звёзд: {stats.get('total_stars', 0)}\n"
+    )
+
+    if top_users:
+        text += f"\n🏆 *Топ-5 платящих:*\n"
+        for i, u in enumerate(top_users[:5], 1):
+            uname = f"@{u['username']}" if u.get('username') else f"id:{u['user_id']}"
+            text += f"{i}. {uname} — {u.get('total_stars', 0)}⭐\n"
+
+    if problematic:
+        text += f"\n⚠️ *Не получили результаты ({len(problematic)}):*\n"
+        for u in problematic[:5]:
+            uname = f"@{u['username']}" if u.get('username') else f"id:{u['user_id']}"
+            text += f"• {uname} — {u.get('pending_count', 0)} в очереди\n"
+
+    await callback.message.answer(text, parse_mode="Markdown")
 
 
 @router.callback_query(F.data == "admin_floodstatus")
@@ -1393,11 +1379,13 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
     access = check_user_access(user.id)
     if not access.can_analyze:
         # Лимит исчерпан - предлагаем купить
-        remaining_hours = 24 - (datetime.now().hour if access.daily_used >= access.daily_limit else 0)
+        # Расчёт времени до полуночи (сброс дневного лимита)
+        now = datetime.now()
+        hours_until_midnight = 24 - now.hour - (1 if now.minute > 0 else 0)
         await message.answer(
             "❌ *Дневной лимит исчерпан*\n\n"
             f"Бесплатно: {access.daily_used}/{access.daily_limit} анализов в день\n"
-            f"⏰ Обновление через ~{remaining_hours}ч\n\n"
+            f"⏰ Обновление через ~{hours_until_midnight}ч\n\n"
             "💎 Или купи анализы за звёзды для моментального доступа:",
             parse_mode="Markdown",
             reply_markup=_get_buy_keyboard(),
@@ -1470,11 +1458,31 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
     # Обновляем время последнего запроса
     _update_rate_limit(user.id)
 
-    status_msg = await message.answer("🛸 Извлекаю смыслы... Подождите минутку")
+    # Определяем режим анализа: lite для бесплатных, full для платных, extended для админов
+    use_lite_mode = is_free_user
+
+    if is_admin(user.id):
+        msg_limit = ADMIN_MESSAGE_LIMIT  # 800 для админов
+    elif use_lite_mode:
+        msg_limit = FREE_MESSAGE_LIMIT   # 150 для бесплатных
+    else:
+        msg_limit = DEFAULT_MESSAGE_LIMIT  # 500 для платных
+
+    if use_lite_mode:
+        status_msg = await message.answer("🛸 Создаю облако слов... Подождите")
+    else:
+        status_msg = await message.answer("🛸 Извлекаю смыслы... Полный анализ займёт минуту")
 
     try:
         # Выполняем анализ через ClientPool
-        result, error = await pool.analyze(channel, use_cache=True, user_id=user.id, is_private=is_private)
+        result, error = await pool.analyze(
+            channel,
+            use_cache=True,
+            user_id=user.id,
+            is_private=is_private,
+            lite_mode=use_lite_mode,
+            message_limit=msg_limit
+        )
 
         if error:
             # Обрабатываем разные типы ошибок
@@ -1546,24 +1554,36 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
             await status_msg.delete()
             return
 
-        # Списываем анализ (только если не из кэша)
-        consume_analysis(user.id, access.reason)
+        # Списываем анализ только если результат НЕ из кэша
+        if not getattr(result, 'from_cache', False):
+            consume_analysis(user.id, access.reason)
 
         # Получаем эмоциональный тон
         emotional_tone = _get_emotional_tone(result.stats.scream_index)
 
-        # Формируем caption со статистикой
-        caption = (
-            f"📊 Канал: {result.title}\n\n"
-            f"📚 Уникальных слов: {result.stats.unique_count}\n"
-            f"📏 Средняя длина поста: {result.stats.avg_len} слов\n"
-            f"🎭 Эмоциональный тон: {emotional_tone}\n"
-            f"👤 Упомянуто личностей: {result.stats.unique_names_count} "
-            f"({result.stats.total_names_mentions} упоминаний)"
-        )
+        # Формируем caption в зависимости от режима
+        if use_lite_mode:
+            # LITE MODE: облако + топ слов
+            caption = (
+                f"📊 *{result.title}*\n\n"
+                f"📚 Уникальных слов: {result.stats.unique_count}\n"
+                f"📏 Средняя длина поста: {result.stats.avg_len} слов\n"
+                f"🎭 Эмоциональный тон: {emotional_tone}\n\n"
+                f"_Это превью. Полный анализ доступен за ⭐_"
+            )
+        else:
+            # FULL MODE: полная статистика
+            caption = (
+                f"📊 Канал: {result.title}\n\n"
+                f"📚 Уникальных слов: {result.stats.unique_count}\n"
+                f"📏 Средняя длина поста: {result.stats.avg_len} слов\n"
+                f"🎭 Эмоциональный тон: {emotional_tone}\n"
+                f"👤 Упомянуто личностей: {result.stats.unique_names_count} "
+                f"({result.stats.total_names_mentions} упоминаний)"
+            )
 
         # Собираем медиагруппу
-        media = [InputMediaPhoto(media=FSInputFile(result.cloud_path), caption=caption)]
+        media = [InputMediaPhoto(media=FSInputFile(result.cloud_path), caption=caption, parse_mode="Markdown")]
 
         if result.graph_path:
             media.append(InputMediaPhoto(media=FSInputFile(result.graph_path)))
@@ -1586,18 +1606,36 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
 
         await message.answer_media_group(media=media)
 
-        # Отдельное сообщение с эмодзи
-        if result.top_emojis:
-            emoji_text = f"🔥 Топ-20 эмодзи канала {result.title}\n\n"
-            for emo, count in result.top_emojis:
-                emoji_text += f"{emo} x {count}\n"
-            await message.answer(emoji_text)
+        # Для lite mode — предложение купить полный анализ
+        if use_lite_mode:
+            await message.answer(
+                "💎 *Хотите полный анализ?*\n\n"
+                "В полной версии:\n"
+                "• Анализ тональности (позитив/агрессия)\n"
+                "• Мат-облако\n"
+                "• Активность по дням и часам\n"
+                "• Упоминаемые личности\n"
+                "• Популярные фразы\n"
+                "• Топ эмодзи\n\n"
+                "Купите анализы за ⭐ и получите полный отчёт!",
+                parse_mode="Markdown",
+                reply_markup=_get_buy_keyboard(),
+            )
+        else:
+            # Отдельное сообщение с эмодзи (только для полного анализа)
+            if result.top_emojis:
+                emoji_text = f"🔥 Топ-20 эмодзи канала {result.title}\n\n"
+                for emo, count in result.top_emojis:
+                    emoji_text += f"{emo} x {count}\n"
+                await message.answer(emoji_text)
 
-        logger.info(f"Анализ канала {channel} успешно отправлен пользователю {user.id}")
+        mode_str = "lite" if use_lite_mode else "full"
+        logger.info(f"Анализ канала {channel} ({mode_str}) успешно отправлен пользователю {user.id}")
         record_analysis("success")
 
-        # Записываем в статистику каналов
-        log_channel_analysis(str(channel), result.title, result.subscribers, analyzed_by=user.id)
+        # Записываем в статистику каналов только если НЕ из кэша
+        if not getattr(result, 'from_cache', False):
+            log_channel_analysis(str(channel), result.title, result.subscribers, analyzed_by=user.id)
 
         # Удаление временных файлов (только если не кэшированный результат)
         for path in result.get_all_paths():

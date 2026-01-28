@@ -16,14 +16,16 @@ import numpy as np
 from telethon import TelegramClient
 from telethon.errors import UsernameNotOccupiedError, UsernameInvalidError, FloodWaitError
 from telethon.tl.functions.messages import ImportChatInviteRequest
+from telethon.tl.functions.channels import LeaveChannelRequest
 
 from config import MOSCOW_TZ, DEFAULT_MESSAGE_LIMIT
 
 # Кэширование результатов анализа
 CACHE_DIR = "cache"
-CACHE_TTL_SECONDS = 4 * 60 * 60  # 4 часа (снижение нагрузки)
-MESSAGES_DELAY_INTERVAL = 50   # Пауза каждые N сообщений (было 100)
-MESSAGES_DELAY_SECONDS = 1.5   # Длительность паузы (было 1.0)
+CACHE_TTL_SECONDS = 12 * 60 * 60  # 12 часов (агрессивное кэширование)
+CACHE_TTL_LITE_SECONDS = 24 * 60 * 60  # 24 часа для lite-анализов
+MESSAGES_DELAY_INTERVAL = 30   # Пауза каждые N сообщений (снижение нагрузки)
+MESSAGES_DELAY_SECONDS = 2.0   # Длительность паузы
 from nlp.processor import get_clean_words, extract_emojis, extract_phrases
 from nlp.constants import positive_words, aggressive_words, METAPHYSICS_WORDS, EVERYDAY_WORDS
 from visualization.wordclouds import (
@@ -83,6 +85,7 @@ class AnalysisResult:
 
     # Данные
     top_emojis: list[tuple[str, int]] = field(default_factory=list)
+    from_cache: bool = False  # Флаг: результат из кэша
 
     def get_all_paths(self) -> list[str]:
         """Возвращает список всех путей к файлам."""
@@ -226,7 +229,8 @@ async def analyze_channel(
     client: TelegramClient,
     channel: str | int,
     limit: int = DEFAULT_MESSAGE_LIMIT,
-    is_private: bool = False
+    is_private: bool = False,
+    lite_mode: bool = False
 ) -> AnalysisResult | None:
     """
     Анализирует Telegram-канал.
@@ -236,6 +240,7 @@ async def analyze_channel(
         channel: Username канала (str) или chat_id (int).
         limit: Максимальное количество сообщений для анализа.
         is_private: Является ли канал приватным (требует присоединения).
+        lite_mode: Облегчённый режим — только облако слов и топ-15 (для бесплатных).
 
     Returns:
         AnalysisResult с результатами или None при ошибке.
@@ -247,6 +252,7 @@ async def analyze_channel(
     channel_key = str(channel).lstrip('@').split('/')[-1].strip().lower()
     
     # Для приватных каналов - пытаемся присоединиться
+    joined_chat = None
     if is_private:
         try:
             logger.info(f"Присоединение к приватному каналу: {channel}")
@@ -255,7 +261,9 @@ async def analyze_channel(
             chat_hash = str(channel).lstrip('+').strip()
             if chat_hash:
                 result = await client(ImportChatInviteRequest(hash=chat_hash))
-                logger.info(f"Успешно присоединены к приватному каналу: {result.chats[0].title if result.chats else 'Unknown'}")
+                if result.chats:
+                    joined_chat = result.chats[0]
+                    logger.info(f"Успешно присоединены к: {joined_chat.title}")
             else:
                 logger.warning(f"Неправильный формат приватного канала: {channel}")
         except Exception as e:
@@ -278,10 +286,9 @@ async def analyze_channel(
         # Получение данных канала с fallback
         entity = None
         try:
-            if is_private:
-                # Для приватных каналов: после присоединения получаем entity по hash
-                # Сначала пытаемся получить через get_entity с hash
-                entity = await client.get_entity(channel)
+            if joined_chat:
+                # Используем результат присоединения напрямую
+                entity = joined_chat
             else:
                 entity = await client.get_entity(channel)
         except ValueError as e:
@@ -381,73 +388,94 @@ async def analyze_channel(
         # Создание визуализаций
         word_counter = Counter(all_words)
 
+        # Основные визуализации (всегда создаются)
         cloud_path = generate_main_cloud(channel_id, all_words, title)
         graph_path = generate_top_words_chart(channel_id, word_counter, title)
-        mats_path = generate_mats_cloud(channel_id, mat_words, title)
-        pos_path = generate_sentiment_cloud(channel_id, pos_words, title, 'positive')
-        agg_path = generate_sentiment_cloud(channel_id, agg_words, title, 'aggressive')
 
-        # Статистика по дням недели (количество постов)
-        weekday_counts = Counter(date.astimezone(MOSCOW_TZ).weekday() for date, _ in posts)
-        weekday_path = generate_weekday_chart(channel_id, dict(weekday_counts), title)
+        # Инициализация путей для полного анализа
+        mats_path = None
+        pos_path = None
+        agg_path = None
+        weekday_path = None
+        hour_path = None
+        names_path = None
+        phrases_path = None
+        register_path = None
+        dichotomy_path = None
+        top_emojis = []
+        unique_names_count = 0
+        total_names_mentions = 0
 
-        # Статистика по часам
-        hour_counts = Counter((date.astimezone(MOSCOW_TZ)).hour for date, _ in posts)
-        hour_path = generate_hour_chart(channel_id, dict(hour_counts), title)
+        if lite_mode:
+            # LITE MODE: только облако + топ слов
+            logger.info(f"Lite-анализ канала {channel_id} (облако + топ-15)")
+        else:
+            # FULL MODE: все визуализации
+            mats_path = generate_mats_cloud(channel_id, mat_words, title)
+            pos_path = generate_sentiment_cloud(channel_id, pos_words, title, 'positive')
+            agg_path = generate_sentiment_cloud(channel_id, agg_words, title, 'aggressive')
 
-        # Имена и личности
-        names_counter = Counter(names)
-        unique_names_count = len(names_counter)
-        total_names_mentions = len(names)
-        top_names = names_counter.most_common(100)
-        names_path = generate_names_chart(
-            channel_id, top_names, title,
-            total_unique_names=unique_names_count,
-            total_mentions=total_names_mentions
-        )
+            # Статистика по дням недели (количество постов)
+            weekday_counts = Counter(date.astimezone(MOSCOW_TZ).weekday() for date, _ in posts)
+            weekday_path = generate_weekday_chart(channel_id, dict(weekday_counts), title)
 
-        # Фразы (триграммы) с фильтрацией
-        all_texts = [text for _, text in posts]
-        top_phrases = extract_phrases(all_texts, n=3)[:10]
-        phrases_path = generate_phrases_chart(channel_id, top_phrases, title)
+            # Статистика по часам
+            hour_counts = Counter((date.astimezone(MOSCOW_TZ)).hour for date, _ in posts)
+            hour_path = generate_hour_chart(channel_id, dict(hour_counts), title)
 
-        # Облако регистра (CAPS vs lowercase)
-        caps_words: list[str] = []
-        lower_words: list[str] = []
-        total_register_words = 0
+            # Имена и личности
+            names_counter = Counter(names)
+            unique_names_count = len(names_counter)
+            total_names_mentions = len(names)
+            top_names = names_counter.most_common(100)
+            names_path = generate_names_chart(
+                channel_id, top_names, title,
+                total_unique_names=unique_names_count,
+                total_mentions=total_names_mentions
+            )
 
-        for _, text in posts:
-            # Извлекаем только кириллические слова 3+ букв
-            words = re.findall(r'[а-яА-ЯёЁ]{3,}', text)
-            for word in words:
-                total_register_words += 1
-                if word.isupper():
-                    caps_words.append(word)
-                elif word.islower():
-                    lower_words.append(word)
+            # Фразы (триграммы) с фильтрацией
+            all_texts = [text for _, text in posts]
+            top_phrases = extract_phrases(all_texts, n=3)[:10]
+            phrases_path = generate_phrases_chart(channel_id, top_phrases, title)
 
-        # Считаем проценты
-        caps_percent = (len(caps_words) / total_register_words * 100) if total_register_words > 0 else 0
-        lower_percent = (len(lower_words) / total_register_words * 100) if total_register_words > 0 else 0
+            # Облако регистра (CAPS vs lowercase)
+            caps_words: list[str] = []
+            lower_words: list[str] = []
+            total_register_words = 0
 
-        # Генерируем облако регистра
-        register_path = generate_register_cloud(
-            channel_id, caps_words, lower_words, title,
-            caps_percent, lower_percent
-        )
+            for _, text in posts:
+                # Извлекаем только кириллические слова 3+ букв
+                words = re.findall(r'[а-яА-ЯёЁ]{3,}', text)
+                for word in words:
+                    total_register_words += 1
+                    if word.isupper():
+                        caps_words.append(word)
+                    elif word.islower():
+                        lower_words.append(word)
 
-        # Дихотомия языка (метафизика vs быт)
-        dichotomy_total = len(metaphysics_words) + len(everyday_words)
-        meta_percent = (len(metaphysics_words) / dichotomy_total * 100) if dichotomy_total > 0 else 0
-        everyday_percent = (len(everyday_words) / dichotomy_total * 100) if dichotomy_total > 0 else 0
-        dichotomy_path = generate_dichotomy_cloud(
-            channel_id, metaphysics_words, everyday_words, title,
-            meta_percent, everyday_percent
-        )
+            # Считаем проценты
+            caps_percent = (len(caps_words) / total_register_words * 100) if total_register_words > 0 else 0
+            lower_percent = (len(lower_words) / total_register_words * 100) if total_register_words > 0 else 0
 
-        # Эмодзи
-        emoji_freq = Counter(all_emojis)
-        top_emojis = emoji_freq.most_common(20)
+            # Генерируем облако регистра
+            register_path = generate_register_cloud(
+                channel_id, caps_words, lower_words, title,
+                caps_percent, lower_percent
+            )
+
+            # Дихотомия языка (метафизика vs быт)
+            dichotomy_total = len(metaphysics_words) + len(everyday_words)
+            meta_percent = (len(metaphysics_words) / dichotomy_total * 100) if dichotomy_total > 0 else 0
+            everyday_percent = (len(everyday_words) / dichotomy_total * 100) if dichotomy_total > 0 else 0
+            dichotomy_path = generate_dichotomy_cloud(
+                channel_id, metaphysics_words, everyday_words, title,
+                meta_percent, everyday_percent
+            )
+
+            # Эмодзи
+            emoji_freq = Counter(all_emojis)
+            top_emojis = emoji_freq.most_common(20)
 
         # Расчёт статистики
         avg_upper = np.mean(upper_ratios) if upper_ratios else 0
@@ -464,7 +492,8 @@ async def analyze_channel(
             repost_percent=repost_percent,
         )
 
-        logger.info(f"Анализ канала {channel_id} завершён успешно")
+        mode_str = "lite" if lite_mode else "full"
+        logger.info(f"Анализ канала {channel_id} завершён успешно ({mode_str})")
 
         result = AnalysisResult(
             title=title,
@@ -486,6 +515,14 @@ async def analyze_channel(
 
         # Сохраняем в кэш для последующих запросов
         _save_to_cache(channel_id.lower(), result)
+
+        # Выходим из приватного канала после анализа
+        if is_private and entity:
+            try:
+                await client(LeaveChannelRequest(entity))
+                logger.info(f"Вышли из приватного канала: {title}")
+            except Exception as e:
+                logger.warning(f"Не удалось выйти из канала: {e}")
 
         return result
 

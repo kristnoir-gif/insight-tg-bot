@@ -142,7 +142,7 @@ class ClientPool:
     - Автоматический переход на следующий аккаунт при FloodWait
     """
 
-    def __init__(self, cache_ttl: int = 1800, cache_max_size: int = 100):
+    def __init__(self, cache_ttl: int = 7200, cache_max_size: int = 200):  # 2 часа TTL, 200 записей
         self._accounts: list[ClientAccount] = []
         self._cache = AnalysisCache(max_size=cache_max_size, ttl_seconds=cache_ttl)
         self._lock = asyncio.Lock()
@@ -192,6 +192,8 @@ class ClientPool:
         use_cache: bool = True,
         user_id: int = 0,
         is_private: bool = False,
+        lite_mode: bool = False,
+        message_limit: int = 400,
     ) -> tuple[AnalysisResult | None, str | None]:
         """
         Выполняет анализ канала с балансировкой и кэшированием.
@@ -201,6 +203,8 @@ class ClientPool:
             use_cache: Использовать ли кэш
             user_id: ID пользователя (для логирования)
             is_private: Является ли канал приватным (требует присоединения)
+            lite_mode: Облегчённый режим — только облако слов (для бесплатных)
+            message_limit: Лимит сообщений для анализа
 
         Returns:
             (result, error_message) — результат или сообщение об ошибке
@@ -210,6 +214,7 @@ class ClientPool:
             cached = self._cache.get(channel)
             if cached:
                 logger.info(f"Returning cached result for {channel} (user={user_id})")
+                cached.from_cache = True
                 return cached, None
 
         # 2. Выбираем аккаунт
@@ -231,9 +236,16 @@ class ClientPool:
                     account.last_used = time.time()
                     account.total_requests += 1
 
-                    logger.info(f"Analyzing {channel} with account {account.name} (user={user_id})")
+                    mode_str = "lite" if lite_mode else "full"
+                    logger.info(f"Analyzing {channel} with account {account.name} (user={user_id}, mode={mode_str}, limit={message_limit})")
 
-                    result = await analyze_channel(account.client, channel, is_private=is_private)
+                    result = await analyze_channel(
+                        account.client,
+                        channel,
+                        limit=message_limit,
+                        is_private=is_private,
+                        lite_mode=lite_mode
+                    )
 
                     if result and result.cloud_path:
                         # Успех — кэшируем

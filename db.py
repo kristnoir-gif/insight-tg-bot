@@ -12,6 +12,9 @@ from dataclasses import dataclass, asdict
 
 logger = logging.getLogger(__name__)
 
+# Путь к базе данных
+DB_PATH = Path(__file__).parent / "users.db"
+
 
 @contextmanager
 def get_db_connection():
@@ -21,9 +24,6 @@ def get_db_connection():
         yield conn
     finally:
         conn.close()
-
-# Путь к базе данных
-DB_PATH = Path(__file__).parent / "users.db"
 
 # ID администраторов
 ADMIN_ID = 26643106  # Основной админ (для уведомлений)
@@ -369,7 +369,7 @@ def consume_analysis(user_id: int, reason: str) -> bool:
 
     Args:
         user_id: ID пользователя.
-        reason: Тип доступа ('free', 'paid', 'premium', 'admin').
+        reason: Тип доступа ('free', 'free_daily', 'paid', 'premium', 'admin').
 
     Returns:
         True если анализ успешно списан, False при ошибке.
@@ -382,7 +382,7 @@ def consume_analysis(user_id: int, reason: str) -> bool:
         cursor = conn.cursor()
         today = date.today().isoformat()
 
-        if reason == "free":
+        if reason in ("free", "free_daily"):
             # Увеличиваем дневной счётчик
             cursor.execute("""
                 UPDATE users
@@ -396,12 +396,15 @@ def consume_analysis(user_id: int, reason: str) -> bool:
             """, (today, today, user_id))
 
         elif reason == "paid":
-            # Списываем с платного баланса
+            # Списываем с платного баланса (только если баланс > 0)
             cursor.execute("""
                 UPDATE users
-                SET paid_balance = paid_balance - 1,
+                SET paid_balance = CASE
+                    WHEN paid_balance > 0 THEN paid_balance - 1
+                    ELSE 0
+                END,
                 request_count = request_count + 1
-                WHERE user_id = ?
+                WHERE user_id = ? AND paid_balance > 0
             """, (user_id,))
 
         elif reason == "premium":
@@ -485,10 +488,19 @@ def get_stats() -> dict:
         cursor.execute("SELECT COUNT(*) FROM users")
         total_users = cursor.fetchone()[0]
 
-        cursor.execute("SELECT SUM(request_count) FROM users")
+        # Используем channel_stats как единый источник для общего числа анализов
+        cursor.execute("SELECT SUM(analysis_count) FROM channel_stats")
         total_requests = cursor.fetchone()[0] or 0
 
-        cursor.execute("SELECT COUNT(*) FROM users WHERE request_count > 0")
+        # Количество уникальных каналов
+        cursor.execute("SELECT COUNT(*) FROM channel_stats")
+        total_channels = cursor.fetchone()[0] or 0
+
+        # Активный пользователь - тот, кто делал анализ в последние 30 дней
+        cursor.execute("""
+            SELECT COUNT(*) FROM users
+            WHERE last_request_date >= date('now', '-30 days')
+        """)
         active_users = cursor.fetchone()[0]
 
         cursor.execute("SELECT COUNT(*) FROM users WHERE premium_until > datetime('now')")
@@ -515,6 +527,7 @@ def get_stats() -> dict:
         return {
             "total_users": total_users,
             "total_requests": total_requests,
+            "total_channels": total_channels,
             "active_users": active_users,
             "premium_users": premium_users,
             "total_paid_balance": total_paid_balance,

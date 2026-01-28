@@ -482,7 +482,7 @@ def set_premium(user_id: int, days: int) -> None:
 def get_stats() -> dict:
     """Получает общую статистику использования бота."""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=10.0)
         cursor = conn.cursor()
 
         cursor.execute("SELECT COUNT(*) FROM users")
@@ -490,7 +490,8 @@ def get_stats() -> dict:
 
         # Используем channel_stats как единый источник для общего числа анализов
         cursor.execute("SELECT SUM(analysis_count) FROM channel_stats")
-        total_requests = cursor.fetchone()[0] or 0
+        result = cursor.fetchone()
+        total_requests = result[0] if result and result[0] else 0
 
         # Количество уникальных каналов
         cursor.execute("SELECT COUNT(*) FROM channel_stats")
@@ -507,7 +508,8 @@ def get_stats() -> dict:
         premium_users = cursor.fetchone()[0]
 
         cursor.execute("SELECT SUM(paid_balance) FROM users")
-        total_paid_balance = cursor.fetchone()[0] or 0
+        result = cursor.fetchone()
+        total_paid_balance = result[0] if result and result[0] else 0
 
         # Пользователи, которые покупали анализы
         cursor.execute("SELECT COUNT(*) FROM users WHERE paid_balance > 0 OR premium_until > datetime('now')")
@@ -536,16 +538,41 @@ def get_stats() -> dict:
         }
 
     except sqlite3.Error as e:
-        logger.error(f"Ошибка получения статистики: {e}")
-        return {
-            "total_users": 0,
-            "total_requests": 0,
-            "active_users": 0,
-            "premium_users": 0,
-            "total_paid_balance": 0,
-            "paid_users": 0,
-            "top_users": [],
-        }
+        logger.error(f"Ошибка получения статистики: {e}", exc_info=True)
+        # Возвращаем последние известные значения вместо нулей
+        # Попробуем хотя бы получить базовую статистику
+        try:
+            conn = sqlite3.connect(DB_PATH, timeout=5.0)
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM users")
+            users_count = cursor.fetchone()[0]
+            cursor.execute("SELECT SUM(analysis_count) FROM channel_stats")
+            result = cursor.fetchone()
+            analyses_count = result[0] if result and result[0] else 0
+            conn.close()
+            
+            return {
+                "total_users": users_count,
+                "total_requests": analyses_count,
+                "total_channels": 0,
+                "active_users": 0,
+                "premium_users": 0,
+                "total_paid_balance": 0,
+                "paid_users": 0,
+                "top_users": [],
+            }
+        except Exception as fallback_error:
+            logger.error(f"Fallback статистики тоже не удался: {fallback_error}")
+            return {
+                "total_users": 0,
+                "total_requests": 0,
+                "total_channels": 0,
+                "active_users": 0,
+                "premium_users": 0,
+                "total_paid_balance": 0,
+                "paid_users": 0,
+                "top_users": [],
+            }
 
 
 def is_admin(user_id: int) -> bool:

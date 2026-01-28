@@ -33,7 +33,7 @@ from telethon.errors import FloodWaitError
 from analyzer import AnalysisError
 from client_pool import get_client_pool
 from metrics import record_analysis, record_floodwait, record_payment
-from config import DEFAULT_MESSAGE_LIMIT, FREE_MESSAGE_LIMIT, ADMIN_MESSAGE_LIMIT
+from config import DEFAULT_MESSAGE_LIMIT, FREE_MESSAGE_LIMIT
 from db import (
     register_user,
     get_stats,
@@ -230,10 +230,7 @@ def _get_main_keyboard(user_id: int = 0) -> ReplyKeyboardMarkup:
     # Добавляем кнопки админки для админов
     if is_admin(user_id):
         keyboard.append([
-            KeyboardButton(text="📋 Мои каналы")
-        ])
-        keyboard.append([
-            KeyboardButton(text="📊 Админка")
+            KeyboardButton(text=" Админка")
         ])
 
     return ReplyKeyboardMarkup(
@@ -344,7 +341,7 @@ async def cmd_start(message: types.Message) -> None:
         "👤 Упоминаемые личности\n"
         "💬 Популярные фразы\n"
         "😀 Топ эмодзи\n\n"
-        "Отправь юзернейм канала для анализа!",
+        "👥 Приглашай друзей через /ref и получай бонусы!",
         parse_mode="Markdown",
         reply_markup=_get_main_keyboard(user.id),
     )
@@ -378,7 +375,8 @@ async def cmd_help(message: types.Message) -> None:
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
         "*Команды:*\n"
         "/buy — купить полные анализы\n"
-        "/balance — ваш баланс",
+        "/balance — ваш баланс\n"
+        "/ref — пригласить друзей",
         parse_mode="Markdown",
         reply_markup=_get_main_keyboard(message.from_user.id),
     )
@@ -388,31 +386,67 @@ async def cmd_help(message: types.Message) -> None:
 async def cmd_balance(message: types.Message) -> None:
     """Показывает текущий платный баланс, статус premium и рефералов."""
     user = message.from_user
-    from db import check_user_access
+    from db import check_user_access, get_referral_stats
 
     status = check_user_access(user.id)
+    referrals = get_referral_stats(user.id)
 
     if status.is_premium:
-        premium_text = f"Да, до {status.premium_until.strftime('%d.%m.%Y')}" if status.premium_until else "Да (безлимитный)"
+        premium_text = f"Да, Premium до {status.premium_until.strftime('%d.%m.%Y')}" if status.premium_until else "Да (безлимитный)"
     else:
         premium_text = "Нет"
-
+    
     text = (
-        f"📋 *Ваш баланс*\n\n"
-        f"💎 Полных анализов: *{status.paid_balance}*\n"
-        f"👑 Premium: {premium_text}\n"
+        f"📋 *Статус пользователя*\n\n"
+        f"💳 Платный баланс: {status.paid_balance}\n"
+        f"⭐ Premium: {premium_text}\n"
+        f"📅 Бесплатно сегодня: {status.daily_used}/{status.daily_limit}\n\n"
+        f"👥 *Рефералы:* {referrals['referral_count']}\n"
     )
-
-    if status.paid_balance > 0:
-        text += f"\n✨ Отправьте юзернейм канала для полного анализа!"
-    else:
-        text += f"\n💡 Купите анализы через /buy"
+    
+    if referrals['referrals']:
+        text += "\n*Последние приглашенные:*\n"
+        for ref in referrals['referrals'][:5]:
+            text += f"• @{ref['username']}\n"
+    
+    text += f"\n💡 Приглашай друзей через /ref"
 
     await message.answer(
         text,
         parse_mode="Markdown",
         reply_markup=_get_main_keyboard(user.id),
     )
+
+
+@router.message(Command("ref"))
+async def cmd_ref(message: types.Message) -> None:
+    """Показывает реферальную ссылку пользователя."""
+    user = message.from_user
+    from db import get_referral_stats
+    
+    bot_username = "insight_tg_bot"  # Имя вашего бота
+    ref_link = f"https://t.me/{bot_username}?start=ref{user.id}"
+    
+    stats = get_referral_stats(user.id)
+    
+    text = (
+        "👥 *Реферальная программа*\n\n"
+        "🎁 Приглашай друзей и получай бонусы!\n\n"
+        "*Ваши преимущества:*\n"
+        "• Вы получаете +1 анализ за каждого друга\n"
+        "• Ваш друг получает +1 анализ при регистрации\n\n"
+        f"*Ваша реферальная ссылка:*\n"
+        f"`{ref_link}`\n\n"
+        f"👥 Приглашено друзей: *{stats['referral_count']}*\n"
+        f"💎 Заработано анализов: *{stats['referral_count']}*"
+    )
+    
+    if stats['referrals']:
+        text += "\n\n*Последние приглашенные:*\n"
+        for ref in stats['referrals'][:5]:
+            text += f"• @{ref['username']}\n"
+    
+    await message.answer(text, parse_mode="Markdown")
 
 
 @router.message(Command("admin"))
@@ -435,14 +469,7 @@ async def cmd_admin(message: types.Message) -> None:
     admin_keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="📋 Справка по командам", callback_data="admin_help")
-            ],
-            [
-                InlineKeyboardButton(text="💳 Платежи", callback_data="admin_payments"),
-                InlineKeyboardButton(text="👥 Платящие", callback_data="admin_paid_users")
-            ],
-            [
-                InlineKeyboardButton(text="🔄 Статус пула", callback_data="admin_floodstatus"),
+                InlineKeyboardButton(text=" Статус пула", callback_data="admin_floodstatus"),
                 InlineKeyboardButton(text="🧹 Очистить кэш", callback_data="admin_clear_cache")
             ]
         ]
@@ -451,12 +478,11 @@ async def cmd_admin(message: types.Message) -> None:
     await message.answer(
         f"📈 *Статистика бота*\n\n"
         f"👥 Всего пользователей: {stats['total_users']}\n"
-        f"✅ Активных (за 30 дней): {stats['active_users']}\n"
-        f"📊 Всего анализов: {stats['total_requests']}\n"
-        f"📋 Уникальных каналов: {stats.get('total_channels', 0)}\n\n"
+        f"📊 Всего анализов: {stats['total_requests']}\n\n"
         f"🚧 FloodWait за последние 24ч:\n"
         f"• Событий: {fw_stats['total']}\n"
-        f"• Пользователей: {fw_stats['users']}",
+        f"• Пользователей: {fw_stats['users']}\n\n"
+        f"🕐 Обновлено: {datetime.now().strftime('%H:%M:%S')}",
         parse_mode="Markdown",
         reply_markup=admin_keyboard,
     )
@@ -485,6 +511,55 @@ async def cmd_floodstatus(message: types.Message) -> None:
 
     pool = get_client_pool()
     await message.answer(pool.status_text(), parse_mode="Markdown")
+
+
+@router.message(Command("update_description"))
+async def cmd_update_description(message: types.Message) -> None:
+    """Админ-команда: обновить описание бота прямо сейчас."""
+    user = message.from_user
+    if not is_admin(user.id):
+        await message.answer("⛔ Доступ запрещён.")
+        return
+
+    try:
+        # Получаем статистику
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM users")
+        total_users = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM channel_stats")
+        total_channels = cursor.fetchone()[0]
+        cursor.execute("SELECT SUM(analysis_count) FROM channel_stats")
+        result = cursor.fetchone()
+        total_analyses = result[0] if result and result[0] else 0
+        conn.close()
+
+        # Форматируем числа
+        def format_number(n: int) -> str:
+            if n >= 1000:
+                return f"{n/1000:.1f}K".replace(".0K", "K")
+            return str(n)
+
+        short_desc = (
+            f"📊 Анализ Telegram-каналов\n"
+            f"👥 {format_number(total_users)} пользователей\n"
+            f"📈 {format_number(total_channels)} каналов | {format_number(total_analyses)} анализов"
+        )
+
+        # Обновляем описание
+        await _bot_instance.set_my_short_description(short_description=short_desc)
+        
+        await message.answer(
+            f"✅ *Описание бота обновлено!*\n\n"
+            f"👥 {total_users} пользователей\n"
+            f"📊 {total_channels} каналов\n"
+            f"📈 {total_analyses} анализов",
+            parse_mode="Markdown"
+        )
+        logger.info(f"✅ Описание обновлено вручную админом {user.id}")
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении описания: {e}", exc_info=True)
+        await message.answer(f"❌ Ошибка: {e}")
 
 
 @router.message(Command("clear_cache"))
@@ -1088,34 +1163,12 @@ async def callback_admin_paid_users(callback: types.CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
-
+    
     await callback.answer()
-
-    # Статистика платежей
-    stats = get_payment_stats()
-    top_users = get_top_paid_users(10)
-    problematic = get_users_with_pending_and_balance()
-
-    text = (
-        f"💰 *Статистика платежей:*\n\n"
-        f"👥 Платящих пользователей: {stats.get('unique_users', 0)}\n"
-        f"💳 Всего платежей: {stats.get('total_payments', 0)}\n"
-        f"⭐ Всего звёзд: {stats.get('total_stars', 0)}\n"
-    )
-
-    if top_users:
-        text += f"\n🏆 *Топ-5 платящих:*\n"
-        for i, u in enumerate(top_users[:5], 1):
-            uname = f"@{u['username']}" if u.get('username') else f"id:{u['user_id']}"
-            text += f"{i}. {uname} — {u.get('total_stars', 0)}⭐\n"
-
-    if problematic:
-        text += f"\n⚠️ *Не получили результаты ({len(problematic)}):*\n"
-        for u in problematic[:5]:
-            uname = f"@{u['username']}" if u.get('username') else f"id:{u['user_id']}"
-            text += f"• {uname} — {u.get('pending_count', 0)} в очереди\n"
-
-    await callback.message.answer(text, parse_mode="Markdown")
+    
+    temp_message = callback.message
+    temp_message.from_user = callback.from_user
+    await cmd_paid_users(temp_message)
 
 
 @router.callback_query(F.data == "admin_floodstatus")
@@ -1458,15 +1511,9 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
     # Обновляем время последнего запроса
     _update_rate_limit(user.id)
 
-    # Определяем режим анализа: lite для бесплатных, full для платных, extended для админов
+    # Определяем режим анализа: lite для бесплатных, full для платных
     use_lite_mode = is_free_user
-
-    if is_admin(user.id):
-        msg_limit = ADMIN_MESSAGE_LIMIT  # 800 для админов
-    elif use_lite_mode:
-        msg_limit = FREE_MESSAGE_LIMIT   # 150 для бесплатных
-    else:
-        msg_limit = DEFAULT_MESSAGE_LIMIT  # 500 для платных
+    msg_limit = FREE_MESSAGE_LIMIT if use_lite_mode else DEFAULT_MESSAGE_LIMIT
 
     if use_lite_mode:
         status_msg = await message.answer("🛸 Создаю облако слов... Подождите")
@@ -1515,6 +1562,20 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
                     "Отправьте юзернейм без @ или ссылку на канал.",
                     parse_mode="Markdown",
                 )
+            elif "ограничен для анализа" in error or "restricted" in error.lower() or "api access" in error.lower():
+                await message.answer(
+                    "🚫 *Канал недоступен для анализа*\n\n"
+                    f"К сожалению, канал `{channel}` имеет ограничения доступа в Telegram API.\n\n"
+                    "Это может быть:\n"
+                    "• 🤖 Канал, управляемый ботом\n"
+                    "• 🔒 Канал со специальными настройками безопасности\n"
+                    "• 🔐 Служебный или закрытый канал\n\n"
+                    "⚠️ *К сожалению, Telegram не позволяет анализировать такие каналы.*\n\n"
+                    "💡 *Рекомендация:*\n"
+                    "Попробуйте анализировать другой публичный канал. "
+                    "Обычно это любой открытый канал без специальных ограничений.",
+                    parse_mode="Markdown",
+                )
             elif "private" in error.lower() or "приватн" in error.lower():
                 if is_private:
                     await message.answer(
@@ -1554,9 +1615,8 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
             await status_msg.delete()
             return
 
-        # Списываем анализ только если результат НЕ из кэша
-        if not getattr(result, 'from_cache', False):
-            consume_analysis(user.id, access.reason)
+        # Списываем анализ (только если не из кэша)
+        consume_analysis(user.id, access.reason)
 
         # Получаем эмоциональный тон
         emotional_tone = _get_emotional_tone(result.stats.scream_index)
@@ -1633,9 +1693,8 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
         logger.info(f"Анализ канала {channel} ({mode_str}) успешно отправлен пользователю {user.id}")
         record_analysis("success")
 
-        # Записываем в статистику каналов только если НЕ из кэша
-        if not getattr(result, 'from_cache', False):
-            log_channel_analysis(str(channel), result.title, result.subscribers, analyzed_by=user.id)
+        # Записываем в статистику каналов
+        log_channel_analysis(str(channel), result.title, result.subscribers, analyzed_by=user.id)
 
         # Удаление временных файлов (только если не кэшированный результат)
         for path in result.get_all_paths():

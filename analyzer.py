@@ -310,7 +310,9 @@ async def analyze_channel(
                 raise
 
         title = entity.title
-        subscribers = getattr(entity, 'participants_count', 0) or 0
+        # Не сохраняем количество подписчиков для приватных/закрытых каналов
+        # это требует дополнительного входа в канал и создает нагрузку на API
+        subscribers = 0 if is_private else (getattr(entity, 'participants_count', 0) or 0)
 
         # Используем username или id для имён файлов
         channel_id = getattr(entity, 'username', None) or str(entity.id)
@@ -318,13 +320,21 @@ async def analyze_channel(
         # Получаем сообщения с задержками для предотвращения FloodWait
         messages = []
         msg_count = 0
-        async for m in client.iter_messages(entity, limit=limit):
-            if m.text:
-                messages.append(m)
-            msg_count += 1
-            # Пауза каждые N сообщений для снижения нагрузки на API
-            if msg_count % MESSAGES_DELAY_INTERVAL == 0:
-                await asyncio.sleep(MESSAGES_DELAY_SECONDS)
+        try:
+            async for m in client.iter_messages(entity, limit=limit):
+                if m.text:
+                    messages.append(m)
+                msg_count += 1
+                # Пауза каждые N сообщений для снижения нагрузки на API
+                if msg_count % MESSAGES_DELAY_INTERVAL == 0:
+                    await asyncio.sleep(MESSAGES_DELAY_SECONDS)
+        except Exception as e:
+            error_str = str(e).lower()
+            if "restricted" in error_str or "api access" in error_str or "bot users" in error_str:
+                logger.error(f"Канал {channel} недоступен для анализа (API ограничение): {e}")
+                raise AnalysisError(f"Канал ограничен для анализа через пользовательский API")
+            else:
+                raise
 
         posts: list[tuple[datetime, str]] = [(m.date, m.text) for m in messages]
 

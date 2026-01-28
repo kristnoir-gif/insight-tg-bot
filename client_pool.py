@@ -274,6 +274,9 @@ class ClientPool:
                     account = self._select_best_account()
                     if account and account.name in tried_accounts:
                         account = None
+                elif "restricted" in error_str or "api access" in error_str:
+                    # Ошибка доступа - канал недоступен для user API
+                    return None, "Не удалось проанализировать канал: Канал ограничен для анализа"
                 else:
                     # Другая ошибка — не пробуем другие аккаунты
                     return None, str(e)

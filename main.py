@@ -56,63 +56,127 @@ async def notify_admin(bot: Bot, message: str) -> None:
         logging.error(f"Не удалось отправить уведомление админу: {e}")
 
 
-async def auto_process_pending_analyses(user_client: TelegramClient, logger: logging.Logger) -> None:
+async def update_bot_description(bot: Bot, logger: logging.Logger) -> None:
     """
-    Фоновая задача для автоматической обработки pending анализов.
-    Запускается каждые 60 секунд.
+    Фоновая задача для обновления описания бота с количеством пользователей.
+    Запускается каждый час.
     """
     while True:
         try:
-            # Ждём перед проверкой
+            await asyncio.sleep(3600)  # Каждый час
+
+            # Получаем статистику
+            try:
+                conn = sqlite3.connect("users.db", timeout=5.0)
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM users")
+                total_users = cursor.fetchone()[0]
+                cursor.execute("SELECT COUNT(*) FROM channel_stats")
+                total_channels = cursor.fetchone()[0]
+                cursor.execute("SELECT SUM(analysis_count) FROM channel_stats")
+                result = cursor.fetchone()
+                total_analyses = result[0] if result and result[0] else 0
+                conn.close()
+            except sqlite3.Error as db_error:
+                logger.error(f"Ошибка доступа к БД при обновлении описания: {db_error}", exc_info=True)
+                await asyncio.sleep(60)
+                continue
+
+            # Форматируем числа
+            def format_number(n: int) -> str:
+                if n >= 1000:
+                    return f"{n/1000:.1f}K".replace(".0K", "K")
+                return str(n)
+
+            # Обновляем short_description (показывается в шапке)
+            short_desc = (
+                f"📊 Анализ Telegram-каналов\n"
+                f"👥 {format_number(total_users)} пользователей\n"
+                f"📈 {format_number(total_channels)} каналов | {format_number(total_analyses)} анализов"
+            )
+
+            await bot.set_my_short_description(short_description=short_desc)
+            logger.info(f"✅ Описание бота обновлено: {total_users} users, {total_channels} channels, {total_analyses} analyses")
+
+        except asyncio.CancelledError:
+            logger.info("Фоновая задача обновления описания отменена")
+            break
+        except TelegramAPIError as api_error:
+            logger.error(f"Ошибка Telegram API при обновлении описания: {api_error}", exc_info=True)
             await asyncio.sleep(60)
-            
-            # Получаем все pending анализы
+        except Exception as e:
+            logger.error(f"Неожиданная ошибка обновления описания бота: {e}", exc_info=True)
+            await asyncio.sleep(60)
+
+
+async def auto_process_pending_analyses(bot: Bot, logger: logging.Logger) -> None:
+    """
+    Фоновая задача для уведомления пользователей о pending анализах.
+    Запускается каждые 5 минут. Уведомляет пользователей, что они могут повторить запрос.
+    """
+    while True:
+        try:
+            # Ждём 5 минут перед проверкой
+            await asyncio.sleep(300)
+
+            # Получаем старые pending анализы (старше 10 минут)
             conn = sqlite3.connect("users.db")
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT id, user_id, channel_username
                 FROM pending_analyses
                 WHERE status = 'pending'
+                AND created_at < datetime('now', '-10 minutes')
                 ORDER BY created_at ASC
-                LIMIT 10
+                LIMIT 5
             """)
             pending_list = cursor.fetchall()
             conn.close()
-            
-            if pending_list:
-                logger.info(f"🔄 Найдено {len(pending_list)} pending анализов, обработка...")
-                
-                # Проверяем доступность основного клиента
-                if not await user_client.is_user_authorized():
-                    logger.warning("⚠️ Основной клиент недоступен, пропуск обработки")
-                    continue
-                
-                processed = 0
-                for analysis_id, user_id, channel_username in pending_list:
-                    try:
-                        # Отмечаем анализ как завершённый
-                        conn = sqlite3.connect("users.db")
-                        cursor = conn.cursor()
-                        cursor.execute("""
-                            UPDATE pending_analyses
-                            SET status = 'completed'
-                            WHERE id = ?
-                        """, (analysis_id,))
-                        conn.commit()
-                        conn.close()
-                        
-                        processed += 1
-                        logger.info(f"✅ Анализ {analysis_id} (user={user_id}, channel=@{channel_username}) завершён")
-                        
-                        await asyncio.sleep(5)
-                    except Exception as e:
-                        logger.error(f"❌ Ошибка при обработке анализа {analysis_id}: {e}")
-                
-                logger.info(f"✅ Обработано {processed}/{len(pending_list)} анализов")
-        
+
+            if not pending_list:
+                continue
+
+            logger.info(f"🔄 Найдено {len(pending_list)} старых pending анализов")
+
+            # Проверяем доступность клиента для анализа
+            pool = get_client_pool()
+            pool_status = pool.status()
+            has_available_account = pool_status.get('available_accounts', 0) > 0
+
+            for analysis_id, user_id, channel_username in pending_list:
+                try:
+                    if has_available_account:
+                        # Уведомляем пользователя что можно повторить запрос
+                        await bot.send_message(
+                            user_id,
+                            f"✅ *Бот снова доступен!*\n\n"
+                            f"Ваш запрос на анализ `{channel_username}` не был выполнен ранее.\n"
+                            f"Отправьте название канала ещё раз для анализа.",
+                            parse_mode="Markdown"
+                        )
+
+                    # Удаляем из очереди (пользователь должен сам повторить)
+                    conn = sqlite3.connect("users.db")
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        UPDATE pending_analyses
+                        SET status = 'notified'
+                        WHERE id = ?
+                    """, (analysis_id,))
+                    conn.commit()
+                    conn.close()
+
+                    logger.info(f"📨 Уведомлён user={user_id} о канале @{channel_username}")
+                    await asyncio.sleep(2)  # Пауза между уведомлениями
+
+                except TelegramAPIError as e:
+                    logger.warning(f"Не удалось уведомить {user_id}: {e}")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка при обработке анализа {analysis_id}: {e}")
+
         except Exception as e:
             logger.error(f"❌ Ошибка в фоновой задаче auto_process_pending: {e}")
-            await asyncio.sleep(60)  # Продолжаем попытки несмотря на ошибки
+            await asyncio.sleep(60)
 
 
 async def main() -> None:
@@ -133,98 +197,83 @@ async def main() -> None:
     dp.include_router(router)
     set_bot_instance(bot)  # Для уведомлений из очереди
 
-    # Инициализация ClientPool с кэшированием на 30 минут
-    pool = init_client_pool(cache_ttl=1800)
+    # Инициализация ClientPool с кэшированием на 2 часа (снижение FloodWait)
+    pool = init_client_pool(cache_ttl=7200)
 
-    # Основной скрапер-клиент
-    user_client = TelegramClient(SESSION_NAME, API_ID, API_HASH, proxy=PROXY_MAIN)
+    # Список клиентов для отключения в finally
+    active_clients: list[TelegramClient] = []
+    failed_sessions: list[str] = []
 
-    # Резервный скрапер-клиент (опционально)
-    backup_client = None
-    # Backup сессия отключена (kristina_user требует интерактивного ввода)
-    backup_client = None
-    # try:
-    #     backup_session_path = f"{BACKUP_SESSION_NAME}.session"
-    #     if os.path.exists(backup_session_path):
-    #         backup_client = TelegramClient(BACKUP_SESSION_NAME, API_ID, API_HASH, proxy=PROXY_BACKUP)
-    #         logger.info(f"Найдена резервная сессия: {backup_session_path}")
-    # except OSError as e:
-    #     logger.warning(f"Не удалось инициализировать backup клиент: {e}")
+    async def try_start_client(
+        session_name: str,
+        proxy: dict | None,
+        account_name: str
+    ) -> TelegramClient | None:
+        """Пытается запустить Telethon клиент. Возвращает клиент или None при ошибке."""
+        session_path = f"{session_name}.session"
+        if not os.path.exists(session_path):
+            logger.info(f"Сессия {session_name} не найдена, пропускаем")
+            return None
 
-    # Третий скрапер-клиент отключен (конфликт с polling)
-    third_client = None
-    # try:
-    #     third_session_path = f"{THIRD_SESSION_NAME}.session"
-    #     if os.path.exists(third_session_path):
-    #         third_client = TelegramClient(THIRD_SESSION_NAME, API_ID, API_HASH, proxy=PROXY_THIRD)
-    #         logger.info(f"Найдена третья сессия: {third_session_path}")
-    # except OSError as e:
-    #     logger.warning(f"Не удалось инициализировать третий клиент: {e}")
+        try:
+            client = TelegramClient(session_name, API_ID, API_HASH, proxy=proxy)
+            if proxy:
+                logger.info(f"{account_name} клиент: используется прокси")
+            # Используем raise_self_error=False чтобы не требовать интерактивного ввода
+            await client.connect()
+            if not await client.is_user_authorized():
+                logger.error(f"❌ Сессия {session_name} не авторизована (требуется переавторизация)")
+                failed_sessions.append(session_name)
+                await client.disconnect()
+                return None
+            pool.add_account(account_name, client)
+            active_clients.append(client)
+            logger.info(f"✅ {account_name} клиент ({session_name}) добавлен в пул")
+            return client
+        except EOFError:
+            logger.error(f"❌ Сессия {session_name} требует повторной авторизации")
+            failed_sessions.append(session_name)
+            return None
+        except AuthKeyDuplicatedError:
+            logger.error(f"❌ Сессия {session_name} скомпрометирована (AuthKeyDuplicatedError)")
+            failed_sessions.append(session_name)
+            # Удаляем скомпрометированный файл
+            if os.path.exists(session_path):
+                os.remove(session_path)
+                logger.info(f"Удален файл скомпрометированной сессии: {session_path}")
+            return None
+        except (ConnectionError, OSError, Exception) as e:
+            logger.warning(f"❌ Не удалось запустить {account_name} клиент ({session_name}): {e}")
+            return None
 
     try:
-        # Запуск основного Telegram-клиента
-        if PROXY_MAIN:
-            logger.info(f"Основной клиент: используется прокси {PROXY_MAIN}")
-        try:
-            await user_client.start()
-        except AuthKeyDuplicatedError:
-            logger.error(f"❌ Сессия {SESSION_NAME} скомпрометирована (AuthKeyDuplicatedError)")
+        # Запускаем все клиенты с небольшими задержками
+        await try_start_client(SESSION_NAME, PROXY_MAIN, "main")
+        await asyncio.sleep(0.5)
+        await try_start_client(BACKUP_SESSION_NAME, PROXY_BACKUP, "backup")
+        await asyncio.sleep(0.5)
+        await try_start_client(THIRD_SESSION_NAME, PROXY_THIRD, "third")
+
+        # Проверяем что хотя бы один клиент запустился
+        if pool.status()['total_accounts'] == 0:
+            error_msg = (
+                f"🚨 *Все сессии невалидны!*\n\n"
+                f"🕐 {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\n\n"
+                f"Невалидные сессии: {', '.join(failed_sessions) if failed_sessions else 'нет файлов сессий'}\n\n"
+                f"Запустите `python create_session.py <имя>` на сервере."
+            )
+            await notify_admin(bot, error_msg)
+            raise RuntimeError("Нет доступных Telethon клиентов. Бот не может работать без них.")
+
+        # Уведомляем админа о проблемных сессиях
+        if failed_sessions:
             await notify_admin(
                 bot,
-                f"🚨 *Сессия скомпрометирована!*\n\n"
-                f"📁 Сессия: {SESSION_NAME}\n"
-                f"🕐 {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\n\n"
-                f"Сессия использовалась с двух разных IP одновременно.\n"
-                f"Удалите файл {SESSION_NAME}.session и создайте новую сессию."
+                f"⚠️ *Некоторые сессии невалидны*\n\n"
+                f"📁 Проблемные: `{', '.join(failed_sessions)}`\n"
+                f"✅ Работают: {pool.status()['total_accounts']} аккаунтов\n\n"
+                f"Бот продолжает работу с оставшимися сессиями."
             )
-            # Удаляем скомпрометированный файл
-            session_file = f"{SESSION_NAME}.session"
-            if os.path.exists(session_file):
-                os.remove(session_file)
-                logger.info(f"Удален файл скомпрометированной сессии: {session_file}")
-            raise
-        pool.add_account("main", user_client)
-        logger.info("Основной клиент добавлен в пул")
-
-        # Запуск backup клиента если есть (с задержкой для избежания блокировки SQLite)
-        if backup_client:
-            await asyncio.sleep(1)
-            try:
-                if PROXY_BACKUP:
-                    logger.info(f"Backup клиент: используется прокси {PROXY_BACKUP}")
-                await backup_client.start()
-                pool.add_account("backup", backup_client)
-                logger.info("Backup клиент добавлен в пул")
-            except AuthKeyDuplicatedError:
-                logger.error(f"❌ Backup сессия {BACKUP_SESSION_NAME} скомпрометирована")
-                session_file = f"{BACKUP_SESSION_NAME}.session"
-                if os.path.exists(session_file):
-                    os.remove(session_file)
-                    logger.info(f"Удален файл скомпрометированной backup сессии: {session_file}")
-                backup_client = None
-            except (ConnectionError, OSError, Exception) as e:
-                logger.warning(f"Не удалось запустить backup клиент: {e}")
-                backup_client = None
-
-        # Запуск третьего клиента если есть
-        if third_client:
-            await asyncio.sleep(1)
-            try:
-                if PROXY_THIRD:
-                    logger.info(f"Третий клиент: используется прокси {PROXY_THIRD}")
-                await third_client.start()
-                pool.add_account("third", third_client)
-                logger.info("Третий клиент добавлен в пул")
-            except AuthKeyDuplicatedError:
-                logger.error(f"❌ Третья сессия {THIRD_SESSION_NAME} скомпрометирована")
-                session_file = f"{THIRD_SESSION_NAME}.session"
-                if os.path.exists(session_file):
-                    os.remove(session_file)
-                    logger.info(f"Удален файл скомпрометированной третьей сессии: {session_file}")
-                third_client = None
-            except (ConnectionError, OSError, Exception) as e:
-                logger.warning(f"Не удалось запустить третий клиент: {e}")
-                third_client = None
 
         logger.info(f"Бот успешно запущен. Пул: {pool.status()['total_accounts']} аккаунтов")
 
@@ -257,8 +306,44 @@ async def main() -> None:
 
         asyncio.create_task(_start_http_server())
 
-        # Запускаем фоновую задачу для автоматической обработки pending анализов
-        asyncio.create_task(auto_process_pending_analyses(user_client, logger))
+        # Запускаем фоновую задачу для уведомления о pending анализах
+        asyncio.create_task(auto_process_pending_analyses(bot, logger))
+
+        # Запускаем фоновую задачу для обновления описания бота
+        asyncio.create_task(update_bot_description(bot, logger))
+
+        # Обновляем описание сразу при старте
+        try:
+            conn = sqlite3.connect("users.db", timeout=5.0)
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM users")
+            total_users = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM channel_stats")
+            total_channels = cursor.fetchone()[0]
+            cursor.execute("SELECT SUM(analysis_count) FROM channel_stats")
+            result = cursor.fetchone()
+            total_analyses = result[0] if result and result[0] else 0
+            conn.close()
+
+            # Форматируем числа (3000 → "3K")
+            def format_number(n: int) -> str:
+                if n >= 1000:
+                    return f"{n/1000:.1f}K".replace(".0K", "K")
+                return str(n)
+
+            short_desc = (
+                f"📊 Анализ Telegram-каналов\n"
+                f"👥 {format_number(total_users)} пользователей\n"
+                f"📈 {format_number(total_channels)} каналов | {format_number(total_analyses)} анализов"
+            )
+            await bot.set_my_short_description(short_description=short_desc)
+            logger.info(f"✅ Описание бота установлено: {total_users} users, {total_channels} channels, {total_analyses} analyses")
+        except sqlite3.Error as db_error:
+            logger.error(f"Ошибка БД при установке описания: {db_error}", exc_info=True)
+        except TelegramAPIError as api_error:
+            logger.error(f"Ошибка Telegram API: {api_error}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Неожиданная ошибка при установке описания бота: {e}", exc_info=True)
 
         # Уведомляем админа о запуске
         await notify_admin(bot, f"✅ Бот запущен\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
@@ -279,11 +364,11 @@ async def main() -> None:
         raise
 
     finally:
-        await user_client.disconnect()
-        if backup_client:
-            await backup_client.disconnect()
-        if third_client:
-            await third_client.disconnect()
+        for client in active_clients:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
         await bot.session.close()
         logger.info("Бот остановлен")
 

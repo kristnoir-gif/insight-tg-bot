@@ -16,13 +16,15 @@ load_dotenv()
 LOG_FORMAT: Final[str] = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 LOG_LEVEL: Final[int] = logging.INFO
 
-# --- SSL обход для macOS ---
-try:
-    _create_unverified_https_context = ssl._create_unverified_context
-except AttributeError:
-    pass
-else:
-    ssl._create_default_https_context = _create_unverified_https_context
+# --- SSL обход для macOS (ОТКЛЮЧЕНО из соображений безопасности) ---
+# ВНИМАНИЕ: Глобальное отключение SSL проверки создаёт уязвимость MITM.
+# Если нужен обход для конкретных запросов, используйте локальный контекст.
+# try:
+#     _create_unverified_https_context = ssl._create_unverified_context
+# except AttributeError:
+#     pass
+# else:
+#     ssl._create_default_https_context = _create_unverified_https_context
 
 # --- Telegram API ---
 API_ID: Final[int] = int(os.getenv("API_ID", "0"))
@@ -140,8 +142,10 @@ WATERMARK_TEXT: Final[str] = "@insight_tg_bot"
 WATERMARK_COLOR: Final[str] = "#752E53"
 
 # --- Анализ ---
-# Баланс между качеством и нагрузкой: 400 сообщений на анализ.
-DEFAULT_MESSAGE_LIMIT: Final[int] = 400  # было 300
+# Лимиты сообщений для анализа
+DEFAULT_MESSAGE_LIMIT: Final[int] = 500  # Полный анализ (платные пользователи)
+FREE_MESSAGE_LIMIT: Final[int] = 150     # Облегчённый анализ (бесплатные пользователи)
+ADMIN_MESSAGE_LIMIT: Final[int] = 800    # Расширенный анализ (админы)
 
 
 def validate_config() -> bool:

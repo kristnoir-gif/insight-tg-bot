@@ -70,6 +70,7 @@ PRIVATE_MODE = False
 ALLOWED_USERS = {"ltdnt"}
 
 # Настройки платежей (Telegram Stars)
+PACK_1_PRICE = 10   # Stars за 1 анализ (попробовать)
 PACK_3_PRICE = 20   # Stars за 3 анализа (стартовый пакет)
 PACK_10_PRICE = 50  # Stars за 10 анализов (выгода: 5 звезд за анализ)
 PACK_30_PRICE = 100 # Stars за 30 анализов (самый выгодный: 3.3 звезды за анализ)
@@ -244,6 +245,12 @@ def _get_buy_keyboard() -> InlineKeyboardMarkup:
     """Создаёт inline-клавиатуру с вариантами покупки полных анализов."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"✨ 1 полный анализ — {PACK_1_PRICE} ⭐",
+                    callback_data="buy_pack_1"
+                )
+            ],
             [
                 InlineKeyboardButton(
                     text=f"🎯 3 полных анализа — {PACK_3_PRICE} ⭐",
@@ -903,6 +910,22 @@ async def handle_balance_button(message: types.Message) -> None:
     await cmd_balance(message)
 
 
+@router.callback_query(F.data == "buy_pack_1")
+async def callback_buy_pack_1(callback: types.CallbackQuery) -> None:
+    """Обработчик покупки 1 полного анализа."""
+    user = callback.from_user
+    logger.info(f"Пользователь {user.id} (@{user.username}) нажал купить 1 полный анализ")
+    await callback.answer()
+
+    await callback.message.answer_invoice(
+        title="1 полный анализ",
+        description="Попробуйте полный анализ канала: тональность, активность, личности, фразы",
+        payload="pack_1",
+        currency="XTR",
+        prices=[LabeledPrice(label="1 полный анализ", amount=PACK_1_PRICE)],
+    )
+
+
 @router.callback_query(F.data == "buy_pack_3")
 async def callback_buy_pack_3(callback: types.CallbackQuery) -> None:
     """Обработчик покупки пакета 3 полных анализов."""
@@ -1017,7 +1040,17 @@ async def handle_successful_payment(message: Message) -> None:
 
     logger.info(f"Успешный платёж от {user.id}: {payload}, {payment.total_amount} Stars")
 
-    if payload == "pack_3":
+    if payload == "pack_1":
+        add_paid_balance(user.id, 1)
+        log_payment(user.id, stars=payment.total_amount, payment_method="telegram_stars", notes="pack_1")
+        record_payment("pack_1", payment.total_amount)
+        await message.answer(
+            "✅ *Спасибо за покупку!*\n\n"
+            "💎 На ваш баланс добавлен *1 полный анализ*.\n\n"
+            "Отправьте юзернейм канала для полного анализа!",
+            parse_mode="Markdown",
+        )
+    elif payload == "pack_3":
         result = add_paid_balance(user.id, 3)
         logger.info(f"💰 Платеж pack_3: user={user.id}, result={result}")
         log_payment(user.id, stars=payment.total_amount, payment_method="telegram_stars", notes="pack_3")

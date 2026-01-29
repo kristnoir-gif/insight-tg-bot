@@ -129,7 +129,7 @@ def _create_cloud(
         )
         fig.text(
             0.5, 0.03, WATERMARK_TEXT,
-            fontsize=14, ha='center', color=WATERMARK_COLOR, alpha=0.9, fontweight='bold'
+            fontsize=11, ha='center', color=WATERMARK_COLOR, alpha=0.9, fontweight='bold'
         )
 
         plt.savefig(path, dpi=DPI, facecolor='white')
@@ -319,7 +319,7 @@ def generate_register_cloud(
         # Водяной знак
         fig.text(
             0.5, 0.03, WATERMARK_TEXT,
-            fontsize=14, ha='center', color=WATERMARK_COLOR, alpha=0.9, fontweight='bold'
+            fontsize=11, ha='center', color=WATERMARK_COLOR, alpha=0.9, fontweight='bold'
         )
 
         plt.savefig(path, dpi=DPI, facecolor='white')
@@ -429,7 +429,7 @@ def generate_dichotomy_cloud(
         # Водяной знак
         fig.text(
             0.5, 0.03, WATERMARK_TEXT,
-            fontsize=14, ha='center', color=WATERMARK_COLOR, alpha=0.9, fontweight='bold'
+            fontsize=11, ha='center', color=WATERMARK_COLOR, alpha=0.9, fontweight='bold'
         )
 
         plt.tight_layout(rect=[0.02, 0.08, 0.98, 0.85])

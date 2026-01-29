@@ -129,6 +129,16 @@ def init_db() -> None:
             )
         """)
 
+        # Таблица кликов по кнопкам покупки (воронка)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS buy_clicks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                action TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Миграция: добавляем новые колонки если их нет
         cursor.execute("PRAGMA table_info(users)")
         columns = [col[1] for col in cursor.fetchall()]
@@ -961,6 +971,36 @@ def get_payment_stats() -> dict:
             }
     except sqlite3.Error as e:
         logger.error(f"Ошибка получения статистики платежей: {e}")
+        return {}
+
+
+def log_buy_click(user_id: int, action: str) -> None:
+    """Логирует клик по кнопке покупки (воронка)."""
+    try:
+        with get_db_connection() as conn:
+            conn.execute(
+                "INSERT INTO buy_clicks (user_id, action) VALUES (?, ?)",
+                (user_id, action),
+            )
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка записи buy_click: {e}")
+
+
+def get_buy_funnel() -> dict:
+    """Возвращает воронку покупок: открыли меню -> выбрали пакет -> оплатили."""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT action, COUNT(*) as cnt, COUNT(DISTINCT user_id) as users
+                FROM buy_clicks
+                GROUP BY action
+                ORDER BY cnt DESC
+            """)
+            rows = cursor.fetchall()
+            return {row[0]: {'clicks': row[1], 'users': row[2]} for row in rows}
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка получения воронки: {e}")
         return {}
 
 

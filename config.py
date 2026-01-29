@@ -138,7 +138,7 @@ CLOUD_WIDTH: Final[int] = 1000
 CLOUD_HEIGHT: Final[int] = 600
 FIGURE_SIZE: Final[tuple[int, int]] = (12, 7)
 BACKGROUND_COLOR: Final[str] = "#f8f9fa"
-WATERMARK_TEXT: Final[str] = "@insight_tg_bot"
+WATERMARK_TEXT: Final[str] = "Создано с помощью бота @insight_tg_bot"
 WATERMARK_COLOR: Final[str] = "#752E53"
 
 # --- Анализ ---

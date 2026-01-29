@@ -18,8 +18,9 @@ numpy>=2.0
 # Environment
 python-dotenv>=1.0
 
-# HTTP health endpoint
+# HTTP health endpoint + web fallback
 aiohttp>=3.8
+beautifulsoup4>=4.12
 
 # Monitoring
 prometheus-client>=0.19

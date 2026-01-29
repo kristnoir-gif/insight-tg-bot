@@ -61,7 +61,7 @@ def _add_watermark(fig: plt.Figure, y: float = 0.03) -> None:
     """Добавляет водяной знак."""
     fig.text(
         0.5, y, WATERMARK_TEXT,
-        fontsize=14, ha='center', color=WATERMARK_COLOR, alpha=0.9, fontweight='bold'
+        fontsize=11, ha='center', color=WATERMARK_COLOR, alpha=0.9, fontweight='bold'
     )
 
 

@@ -9,14 +9,18 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from time import time as time_now
+
+import aiohttp
+from bs4 import BeautifulSoup
 
 import numpy as np
 from telethon import TelegramClient
 from telethon.errors import UsernameNotOccupiedError, UsernameInvalidError, FloodWaitError
 from telethon.tl.functions.messages import ImportChatInviteRequest
 from telethon.tl.functions.channels import LeaveChannelRequest
+from telethon.tl.types import User
 
 from config import MOSCOW_TZ, DEFAULT_MESSAGE_LIMIT
 
@@ -225,6 +229,266 @@ def _save_to_cache(channel_id: str, result: AnalysisResult) -> None:
         logger.warning(f"Ошибка сохранения кэша: {e}")
 
 
+async def _fetch_posts_from_web(channel_username: str, limit: int = 500) -> tuple[str, int, list[tuple[datetime, str]]]:
+    """
+    Парсит посты публичного канала через t.me/s/channel с пагинацией.
+    Возвращает (title, subscribers, posts).
+    Не требует аккаунта — обычный HTTP.
+    """
+    posts = []
+    title = channel_username
+    subscribers = 0
+    before_id = None
+
+    async with aiohttp.ClientSession() as session:
+        for page in range(50):  # макс 50 страниц (~1000 постов)
+            url = f"https://t.me/s/{channel_username}"
+            if before_id:
+                url += f"?before={before_id}"
+
+            try:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status != 200:
+                        break
+                    html = await resp.text()
+            except Exception as e:
+                logger.warning(f"Web fetch error page {page}: {e}")
+                break
+
+            soup = BeautifulSoup(html, 'html.parser')
+
+            # Название канала (только с первой страницы)
+            if page == 0:
+                title_el = soup.find('div', class_='tgme_channel_info_header_title')
+                if title_el:
+                    title = title_el.get_text(strip=True)
+                extra_el = soup.find('div', class_='tgme_channel_info_counter')
+                if not extra_el:
+                    extra_el = soup.find('div', class_='tgme_page_extra')
+                if extra_el:
+                    match = re.search(r'([\d\s,.]+)', extra_el.get_text())
+                    if match:
+                        try:
+                            subscribers = int(re.sub(r'[\s,.]', '', match.group(1)))
+                        except ValueError:
+                            pass
+
+            # Парсим посты
+            msg_widgets = soup.find_all('div', class_='tgme_widget_message_wrap')
+            if not msg_widgets:
+                break
+
+            min_id = None
+            for widget in msg_widgets:
+                msg_div = widget.find('div', class_='tgme_widget_message')
+                if not msg_div:
+                    continue
+
+                # ID поста
+                data_post = msg_div.get('data-post', '')
+                msg_id_str = data_post.split('/')[-1] if '/' in data_post else ''
+                try:
+                    msg_id = int(msg_id_str)
+                except ValueError:
+                    continue
+
+                if min_id is None or msg_id < min_id:
+                    min_id = msg_id
+
+                # Текст
+                text_div = msg_div.find('div', class_='tgme_widget_message_text')
+                if not text_div:
+                    continue
+                text = text_div.get_text(separator=' ', strip=True)
+                if not text:
+                    continue
+
+                # Дата
+                time_el = msg_div.find('time')
+                if time_el and time_el.get('datetime'):
+                    try:
+                        dt = datetime.fromisoformat(time_el['datetime'].replace('+00:00', '+00:00'))
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                    except (ValueError, TypeError):
+                        dt = datetime.now(timezone.utc)
+                else:
+                    dt = datetime.now(timezone.utc)
+
+                posts.append((dt, text))
+
+            if min_id is None or len(posts) >= limit:
+                break
+
+            before_id = min_id
+            await asyncio.sleep(0.3)  # вежливая пауза
+
+    # Убираем дубликаты по тексту, сохраняя порядок
+    seen = set()
+    unique_posts = []
+    for dt, text in posts:
+        if text not in seen:
+            seen.add(text)
+            unique_posts.append((dt, text))
+
+    return title, subscribers, unique_posts[:limit]
+
+
+async def analyze_channel_web(
+    channel: str,
+    limit: int = DEFAULT_MESSAGE_LIMIT,
+    lite_mode: bool = False
+) -> AnalysisResult | None:
+    """
+    Анализирует публичный канал через веб-парсинг (без Telethon-аккаунта).
+    Используется как фоллбэк при FloodWait всех аккаунтов.
+    """
+    channel_key = str(channel).lstrip('@').split('/')[-1].strip().lower()
+
+    # Проверяем кэш
+    if _is_cache_valid(channel_key):
+        cached_result = _load_from_cache(channel_key)
+        if cached_result and cached_result.cloud_path:
+            logger.info(f"[WEB] Используем кэш для канала {channel}")
+            return cached_result
+
+    logger.info(f"[WEB] Начат веб-анализ канала: {channel}")
+    title, subscribers, posts = await _fetch_posts_from_web(channel_key, limit)
+
+    if not posts:
+        logger.warning(f"[WEB] Канал {channel} пуст или недоступен")
+        return None
+
+    logger.info(f"[WEB] Получено {len(posts)} постов из канала {channel}")
+
+    channel_id = channel_key
+    repost_count = 0
+    repost_percent = 0.0
+
+    # === Общая логика анализа (как в analyze_channel) ===
+    all_words: list[str] = []
+    mat_words: list[str] = []
+    pos_words: list[str] = []
+    agg_words: list[str] = []
+    metaphysics_words_list: list[str] = []
+    everyday_words_list: list[str] = []
+    names: list[str] = []
+    all_emojis: list[str] = []
+    upper_ratios: list[float] = []
+    excl_counts: list[float] = []
+
+    for date, text in posts:
+        all_words.extend(get_clean_words(text, 'normal'))
+        mat_words.extend(get_clean_words(text, 'mats'))
+        names.extend(get_clean_words(text, 'person'))
+        all_emojis.extend(extract_emojis(text))
+
+        clean = get_clean_words(text, 'normal')
+        pos_words.extend(w for w in clean if w in positive_words)
+        agg_words.extend(w for w in clean if w in aggressive_words)
+        metaphysics_words_list.extend(w for w in clean if w in METAPHYSICS_WORDS)
+        everyday_words_list.extend(w for w in clean if w in EVERYDAY_WORDS)
+
+        if text:
+            alpha_count = sum(1 for c in text if c.isalpha())
+            if alpha_count > 0:
+                upper_ratios.append(sum(c.isupper() for c in text) / alpha_count)
+            word_count = len(text.split())
+            if word_count > 0:
+                excl_counts.append(text.count('!') / word_count)
+
+    if not all_words:
+        logger.warning(f"[WEB] Не удалось извлечь слова из канала {channel}")
+        return AnalysisResult(title=title, subscribers=subscribers)
+
+    word_counter = Counter(all_words)
+    cloud_path = generate_main_cloud(channel_id, all_words, title)
+    graph_path = generate_top_words_chart(channel_id, word_counter, title)
+
+    mats_path = pos_path = agg_path = weekday_path = hour_path = None
+    names_path = phrases_path = register_path = dichotomy_path = None
+    top_emojis = []
+    unique_names_count = total_names_mentions = 0
+
+    if not lite_mode:
+        mats_path = generate_mats_cloud(channel_id, mat_words, title)
+        pos_path = generate_sentiment_cloud(channel_id, pos_words, title, 'positive')
+        agg_path = generate_sentiment_cloud(channel_id, agg_words, title, 'aggressive')
+
+        weekday_counts = Counter(date.astimezone(MOSCOW_TZ).weekday() for date, _ in posts)
+        weekday_path = generate_weekday_chart(channel_id, dict(weekday_counts), title)
+        hour_counts = Counter(date.astimezone(MOSCOW_TZ).hour for date, _ in posts)
+        hour_path = generate_hour_chart(channel_id, dict(hour_counts), title)
+
+        names_counter = Counter(names)
+        unique_names_count = len(names_counter)
+        total_names_mentions = len(names)
+        names_path = generate_names_chart(
+            channel_id, names_counter.most_common(100), title,
+            total_unique_names=unique_names_count, total_mentions=total_names_mentions
+        )
+
+        all_texts = [text for _, text in posts]
+        top_phrases = extract_phrases(all_texts, n=3)[:10]
+        phrases_path = generate_phrases_chart(channel_id, top_phrases, title)
+
+        caps_words: list[str] = []
+        lower_words: list[str] = []
+        total_register_words = 0
+        for _, text in posts:
+            words = re.findall(r'[а-яА-ЯёЁ]{3,}', text)
+            for word in words:
+                total_register_words += 1
+                if word.isupper():
+                    caps_words.append(word)
+                elif word.islower():
+                    lower_words.append(word)
+
+        caps_percent = (len(caps_words) / total_register_words * 100) if total_register_words > 0 else 0
+        lower_percent = (len(lower_words) / total_register_words * 100) if total_register_words > 0 else 0
+        register_path = generate_register_cloud(
+            channel_id, caps_words, lower_words, title, caps_percent, lower_percent
+        )
+
+        dichotomy_total = len(metaphysics_words_list) + len(everyday_words_list)
+        meta_percent = (len(metaphysics_words_list) / dichotomy_total * 100) if dichotomy_total > 0 else 0
+        everyday_percent = (len(everyday_words_list) / dichotomy_total * 100) if dichotomy_total > 0 else 0
+        dichotomy_path = generate_dichotomy_cloud(
+            channel_id, metaphysics_words_list, everyday_words_list, title, meta_percent, everyday_percent
+        )
+
+        emoji_freq = Counter(all_emojis)
+        top_emojis = emoji_freq.most_common(20)
+
+    avg_upper = np.mean(upper_ratios) if upper_ratios else 0
+    avg_excl = np.mean(excl_counts) if excl_counts else 0
+    scream_index = round(avg_upper * 100 + avg_excl * 10, 1)
+
+    stats = ChannelStats(
+        unique_count=len(set(all_words)),
+        avg_len=round(np.mean([len(p[1].split()) for p in posts]), 1),
+        scream_index=scream_index,
+        unique_names_count=unique_names_count,
+        total_names_mentions=total_names_mentions,
+        repost_count=repost_count,
+        repost_percent=repost_percent,
+    )
+
+    result = AnalysisResult(
+        title=title, subscribers=subscribers, stats=stats,
+        cloud_path=cloud_path, graph_path=graph_path,
+        mats_path=mats_path, positive_path=pos_path, aggressive_path=agg_path,
+        weekday_path=weekday_path, hour_path=hour_path,
+        names_path=names_path, phrases_path=phrases_path,
+        register_path=register_path, dichotomy_path=dichotomy_path,
+        top_emojis=top_emojis,
+    )
+
+    _save_to_cache(channel_key, result)
+    logger.info(f"[WEB] Анализ канала {channel_id} завершён ({len(posts)} постов)")
+    return result
+
+
 async def analyze_channel(
     client: TelegramClient,
     channel: str | int,
@@ -308,6 +572,9 @@ async def analyze_channel(
                             pass
             if entity is None:
                 raise
+
+        if isinstance(entity, User):
+            raise AnalysisError("Это аккаунт пользователя, а не канал. Отправьте юзернейм канала.")
 
         title = entity.title
         # Не сохраняем количество подписчиков для приватных/закрытых каналов

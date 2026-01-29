@@ -11,7 +11,7 @@ from collections import OrderedDict
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
 
-from analyzer import analyze_channel, AnalysisResult, AnalysisError
+from analyzer import analyze_channel, analyze_channel_web, AnalysisResult, AnalysisError
 
 logger = logging.getLogger(__name__)
 
@@ -274,9 +274,12 @@ class ClientPool:
                     account = self._select_best_account()
                     if account and account.name in tried_accounts:
                         account = None
-                elif "restricted" in error_str or "api access" in error_str:
-                    # Ошибка доступа - канал недоступен для user API
-                    return None, "Не удалось проанализировать канал: Канал ограничен для анализа"
+                elif "restricted" in error_str or "api access" in error_str or "bot users" in error_str or "ограничен" in error_str:
+                    # Аккаунт не может анализировать — пробуем следующий
+                    logger.warning(f"Account {account.name} restricted (bot?), trying next account")
+                    account = self._select_best_account()
+                    if account and account.name in tried_accounts:
+                        account = None
                 else:
                     # Другая ошибка — не пробуем другие аккаунты
                     return None, str(e)
@@ -286,7 +289,21 @@ class ClientPool:
                 logger.exception(f"Unexpected error analyzing {channel} with {account.name}")
                 return None, str(e)
 
-        # Все аккаунты в cooldown или пробовали
+        # Все аккаунты в cooldown или пробовали — пробуем веб-парсинг
+        if not is_private:
+            channel_str = str(channel).lstrip('@').split('/')[-1].strip()
+            if channel_str and not channel_str.startswith('+') and not channel_str.isdigit():
+                logger.info(f"All accounts unavailable, trying web fallback for {channel_str}")
+                try:
+                    result = await analyze_channel_web(channel_str, limit=message_limit, lite_mode=lite_mode)
+                    if result and result.cloud_path:
+                        result.from_cache = False
+                        logger.info(f"Web fallback succeeded for {channel_str}")
+                        return result, None
+                except Exception as e:
+                    logger.warning(f"Web fallback failed for {channel_str}: {e}")
+                    return None, f"web_fallback_failed:{channel_str}:{str(e)[:100]}"
+
         if self._accounts:
             min_cooldown = min(acc.cooldown_remaining for acc in self._accounts)
             return None, f"all_cooldown:{min_cooldown}"

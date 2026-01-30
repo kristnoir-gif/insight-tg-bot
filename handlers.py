@@ -7,6 +7,7 @@ import time
 import asyncio
 import json
 import sqlite3
+import html
 import urllib.parse
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -1868,26 +1869,24 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
             await status_msg.delete()
             return
 
-        # Списываем анализ (только если не из кэша)
-        consume_analysis(user.id, access.reason)
-
         # Получаем эмоциональный тон
         emotional_tone = _get_emotional_tone(result.stats.scream_index)
 
         # Формируем caption в зависимости от режима
+        safe_title = html.escape(result.title)
         if use_lite_mode:
             # LITE MODE: облако + топ слов
             caption = (
-                f"📊 *{result.title}*\n\n"
+                f"📊 <b>{safe_title}</b>\n\n"
                 f"📚 Уникальных слов: {result.stats.unique_count}\n"
                 f"📏 Средняя длина поста: {result.stats.avg_len} слов\n"
                 f"🎭 Эмоциональный тон: {emotional_tone}\n\n"
-                f"_Это превью. Полный анализ доступен за ⭐_"
+                f"<i>Это превью. Полный анализ доступен за ⭐</i>"
             )
         else:
             # FULL MODE: полная статистика
             caption = (
-                f"📊 Канал: {result.title}\n\n"
+                f"📊 Канал: {safe_title}\n\n"
                 f"📚 Уникальных слов: {result.stats.unique_count}\n"
                 f"📏 Средняя длина поста: {result.stats.avg_len} слов\n"
                 f"🎭 Эмоциональный тон: {emotional_tone}\n"
@@ -1895,34 +1894,38 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
                 f"({result.stats.total_names_mentions} упоминаний)"
             )
 
-        # Собираем медиагруппу
-        media = [InputMediaPhoto(media=FSInputFile(result.cloud_path), caption=caption, parse_mode="Markdown")]
+        # Собираем медиагруппу (проверяем существование файлов на диске)
+        media = []
+        if result.cloud_path and os.path.exists(result.cloud_path):
+            media.append(InputMediaPhoto(media=FSInputFile(result.cloud_path), caption=caption, parse_mode="HTML"))
 
-        if result.graph_path:
-            media.append(InputMediaPhoto(media=FSInputFile(result.graph_path)))
-        if result.mats_path:
-            media.append(InputMediaPhoto(media=FSInputFile(result.mats_path)))
-        if result.positive_path:
-            media.append(InputMediaPhoto(media=FSInputFile(result.positive_path)))
-        if result.aggressive_path:
-            media.append(InputMediaPhoto(media=FSInputFile(result.aggressive_path)))
-        if result.weekday_path:
-            media.append(InputMediaPhoto(media=FSInputFile(result.weekday_path)))
-        if result.hour_path:
-            media.append(InputMediaPhoto(media=FSInputFile(result.hour_path)))
-        if result.names_path:
-            media.append(InputMediaPhoto(media=FSInputFile(result.names_path)))
-        if result.phrases_path:
-            media.append(InputMediaPhoto(media=FSInputFile(result.phrases_path)))
-        if result.dichotomy_path:
-            media.append(InputMediaPhoto(media=FSInputFile(result.dichotomy_path)))
+        optional_paths = [
+            result.graph_path, result.mats_path, result.positive_path,
+            result.aggressive_path, result.weekday_path, result.hour_path,
+            result.names_path, result.phrases_path, result.dichotomy_path,
+        ]
+        for path in optional_paths:
+            if path and os.path.exists(path):
+                media.append(InputMediaPhoto(media=FSInputFile(path)))
+
+        if not media:
+            await message.answer("Не удалось сформировать изображения для анализа. Попробуйте ещё раз.")
+            return
+
+        # Гарантируем, что caption есть на первом элементе
+        if not media[0].caption:
+            media[0].caption = caption
+            media[0].parse_mode = "HTML"
 
         await message.answer_media_group(media=media)
+
+        # Списываем анализ только после успешной отправки
+        consume_analysis(user.id, access.reason)
 
         # Для lite mode — предложение купить полный анализ
         if use_lite_mode:
             await message.answer(
-                "💎 *Хотите полный анализ?*\n\n"
+                "💎 <b>Хотите полный анализ?</b>\n\n"
                 "В полной версии:\n"
                 "• Анализ тональности (позитив/агрессия)\n"
                 "• Мат-облако\n"
@@ -1931,7 +1934,7 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
                 "• Популярные фразы\n"
                 "• Топ эмодзи\n\n"
                 "Купите анализы за ⭐ и получите полный отчёт!",
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=_get_buy_keyboard(user.id),
             )
         else:

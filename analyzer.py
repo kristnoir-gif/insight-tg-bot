@@ -127,14 +127,19 @@ def _is_cache_valid(channel_id: str) -> bool:
     return False
 
 
-def _load_from_cache(channel_id: str) -> AnalysisResult | None:
-    """Загружает результат из кэша."""
+def _load_from_cache(channel_id: str, require_full: bool = False) -> AnalysisResult | None:
+    """Загружает результат из кэша. Если require_full=True, пропускает lite-кэш."""
     cache_path = _get_cache_path(channel_id)
     meta_path = os.path.join(cache_path, "meta.json")
 
     try:
         with open(meta_path, "r") as f:
             meta = json.load(f)
+
+        # Если нужен full-анализ, а в кэше lite — пропускаем
+        if require_full and meta.get("lite", False):
+            logger.info(f"Кэш для {channel_id} — lite, нужен full, пропускаем")
+            return None
 
         result = AnalysisResult(
             title=meta.get("title", ""),
@@ -152,30 +157,13 @@ def _load_from_cache(channel_id: str) -> AnalysisResult | None:
         # Копируем изображения из кэша во временные файлы
         for img_name in ["cloud.png", "graph.png", "mats.png", "positive.png",
                          "aggressive.png", "weekday.png", "hour.png",
-                         "names.png", "phrases.png"]:
+                         "names.png", "phrases.png", "register.png", "dichotomy.png"]:
             src = os.path.join(cache_path, img_name)
             if os.path.exists(src):
                 dst = f"{channel_id}_{img_name}"
                 shutil.copy(src, dst)
                 attr_name = img_name.replace(".png", "_path")
-                if attr_name == "cloud_path":
-                    result.cloud_path = dst
-                elif attr_name == "graph_path":
-                    result.graph_path = dst
-                elif attr_name == "mats_path":
-                    result.mats_path = dst
-                elif attr_name == "positive_path":
-                    result.positive_path = dst
-                elif attr_name == "aggressive_path":
-                    result.aggressive_path = dst
-                elif attr_name == "weekday_path":
-                    result.weekday_path = dst
-                elif attr_name == "hour_path":
-                    result.hour_path = dst
-                elif attr_name == "names_path":
-                    result.names_path = dst
-                elif attr_name == "phrases_path":
-                    result.phrases_path = dst
+                setattr(result, attr_name, dst)
 
         logger.info(f"Загружен кэш для канала {channel_id}")
         return result
@@ -185,7 +173,7 @@ def _load_from_cache(channel_id: str) -> AnalysisResult | None:
         return None
 
 
-def _save_to_cache(channel_id: str, result: AnalysisResult) -> None:
+def _save_to_cache(channel_id: str, result: AnalysisResult, lite_mode: bool = False) -> None:
     """Сохраняет результат в кэш."""
     cache_path = _get_cache_path(channel_id)
 
@@ -203,6 +191,7 @@ def _save_to_cache(channel_id: str, result: AnalysisResult) -> None:
             "unique_names_count": result.stats.unique_names_count,
             "total_names_mentions": result.stats.total_names_mentions,
             "top_emojis": result.top_emojis,
+            "lite": lite_mode,
         }
         with open(os.path.join(cache_path, "meta.json"), "w") as f:
             json.dump(meta, f)
@@ -218,6 +207,8 @@ def _save_to_cache(channel_id: str, result: AnalysisResult) -> None:
             "hour.png": result.hour_path,
             "names.png": result.names_path,
             "phrases.png": result.phrases_path,
+            "register.png": result.register_path,
+            "dichotomy.png": result.dichotomy_path,
         }
         for cache_name, src_path in path_mapping.items():
             if src_path and os.path.exists(src_path):
@@ -347,7 +338,7 @@ async def analyze_channel_web(
 
     # Проверяем кэш
     if _is_cache_valid(channel_key):
-        cached_result = _load_from_cache(channel_key)
+        cached_result = _load_from_cache(channel_key, require_full=not lite_mode)
         if cached_result and cached_result.cloud_path:
             logger.info(f"[WEB] Используем кэш для канала {channel}")
             return cached_result
@@ -484,7 +475,7 @@ async def analyze_channel_web(
         top_emojis=top_emojis,
     )
 
-    _save_to_cache(channel_key, result)
+    _save_to_cache(channel_key, result, lite_mode=lite_mode)
     logger.info(f"[WEB] Анализ канала {channel_id} завершён ({len(posts)} постов)")
     return result
 
@@ -536,7 +527,7 @@ async def analyze_channel(
 
     # Проверяем кэш
     if _is_cache_valid(channel_key):
-        cached_result = _load_from_cache(channel_key)
+        cached_result = _load_from_cache(channel_key, require_full=not lite_mode)
         if cached_result and cached_result.cloud_path:
             logger.info(f"Используем кэш для канала {channel}")
             return cached_result
@@ -791,7 +782,7 @@ async def analyze_channel(
         )
 
         # Сохраняем в кэш для последующих запросов
-        _save_to_cache(channel_id.lower(), result)
+        _save_to_cache(channel_id.lower(), result, lite_mode=lite_mode)
 
         # Выходим из приватного канала после анализа
         if is_private and entity:

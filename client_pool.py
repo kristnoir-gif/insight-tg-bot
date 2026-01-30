@@ -209,11 +209,12 @@ class ClientPool:
         Returns:
             (result, error_message) — результат или сообщение об ошибке
         """
-        # 1. Проверяем кэш
+        # 1. Проверяем кэш (lite и full кэшируются отдельно)
+        cache_key = f"{channel}:lite" if lite_mode else f"{channel}:full"
         if use_cache:
-            cached = self._cache.get(channel)
+            cached = self._cache.get(cache_key)
             if cached:
-                logger.info(f"Returning cached result for {channel} (user={user_id})")
+                logger.info(f"Cached result for {channel} (user={user_id})")
                 cached.from_cache = True
                 return cached, None
 
@@ -249,7 +250,7 @@ class ClientPool:
 
                     if result and result.cloud_path:
                         # Успех — кэшируем
-                        self._cache.set(channel, result)
+                        self._cache.set(cache_key, result)
                         return result, None
                     else:
                         return None, "empty_result"

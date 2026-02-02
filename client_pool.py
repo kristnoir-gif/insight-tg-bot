@@ -12,6 +12,7 @@ from telethon import TelegramClient
 from telethon.errors import FloodWaitError
 
 from analyzer import analyze_channel, analyze_channel_web, AnalysisResult, AnalysisError
+from config import CACHE_TTL_LITE, CACHE_TTL_FULL
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,7 @@ class CachedResult:
     result: AnalysisResult
     created_at: float
 
-    def is_expired(self, ttl_seconds: int = 1800) -> bool:
+    def is_expired(self, ttl_seconds: int = CACHE_TTL_LITE) -> bool:
         """Проверяет истёк ли TTL (по умолчанию 30 минут)."""
         return time.time() - self.created_at > ttl_seconds
 
@@ -67,7 +68,7 @@ class ClientAccount:
 class AnalysisCache:
     """LRU кэш для результатов анализа."""
 
-    def __init__(self, max_size: int = 100, ttl_seconds: int = 1800):
+    def __init__(self, max_size: int = 100, ttl_seconds: int = CACHE_TTL_LITE):
         self._cache: OrderedDict[str, CachedResult] = OrderedDict()
         self._max_size = max_size
         self._ttl_seconds = ttl_seconds
@@ -142,7 +143,7 @@ class ClientPool:
     - Автоматический переход на следующий аккаунт при FloodWait
     """
 
-    def __init__(self, cache_ttl: int = 7200, cache_max_size: int = 200):  # 2 часа TTL, 200 записей
+    def __init__(self, cache_ttl: int = CACHE_TTL_FULL, cache_max_size: int = 200):  # 2 часа TTL, 200 записей
         self._accounts: list[ClientAccount] = []
         self._cache = AnalysisCache(max_size=cache_max_size, ttl_seconds=cache_ttl)
         self._lock = asyncio.Lock()
@@ -281,6 +282,10 @@ class ClientPool:
                     account = self._select_best_account()
                     if account and account.name in tried_accounts:
                         account = None
+                elif "не найден" in error_str or "no user has" in error_str:
+                    # Канал не найден через API — попробуем веб-фоллбэк
+                    logger.warning(f"Channel {channel} not found via API on {account.name}, will try web fallback")
+                    break  # Выходим из while — дальше сработает веб-фоллбэк
                 else:
                     # Другая ошибка — не пробуем другие аккаунты
                     return None, str(e)
@@ -387,7 +392,7 @@ def get_client_pool() -> ClientPool:
     return _client_pool
 
 
-def init_client_pool(cache_ttl: int = 1800) -> ClientPool:
+def init_client_pool(cache_ttl: int = CACHE_TTL_LITE) -> ClientPool:
     """Инициализирует глобальный пул клиентов."""
     global _client_pool
     _client_pool = ClientPool(cache_ttl=cache_ttl)

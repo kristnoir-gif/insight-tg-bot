@@ -6,6 +6,7 @@ import os
 import json
 import shutil
 import asyncio
+import functools
 import logging
 from dataclasses import dataclass, field
 from collections import Counter
@@ -22,14 +23,10 @@ from telethon.tl.functions.messages import ImportChatInviteRequest
 from telethon.tl.functions.channels import LeaveChannelRequest
 from telethon.tl.types import User
 
-from config import MOSCOW_TZ, DEFAULT_MESSAGE_LIMIT
+from config import MOSCOW_TZ, DEFAULT_MESSAGE_LIMIT, DISK_CACHE_TTL, DISK_CACHE_TTL_LITE, FETCH_DELAY_EVERY_N, FETCH_DELAY_SECONDS
 
 # Кэширование результатов анализа
 CACHE_DIR = "cache"
-CACHE_TTL_SECONDS = 12 * 60 * 60  # 12 часов (агрессивное кэширование)
-CACHE_TTL_LITE_SECONDS = 24 * 60 * 60  # 24 часа для lite-анализов
-MESSAGES_DELAY_INTERVAL = 30   # Пауза каждые N сообщений (снижение нагрузки)
-MESSAGES_DELAY_SECONDS = 2.0   # Длительность паузы
 from nlp.processor import get_clean_words, extract_emojis, extract_phrases
 from nlp.constants import positive_words, aggressive_words, METAPHYSICS_WORDS, EVERYDAY_WORDS
 from visualization.wordclouds import (
@@ -48,6 +45,12 @@ from visualization.charts import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def _run_sync(func, *args, **kwargs):
+    """Запускает синхронную функцию в executor чтобы не блокировать event loop."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, functools.partial(func, *args, **kwargs))
 
 
 class AnalysisError(Exception):
@@ -119,7 +122,7 @@ def _is_cache_valid(channel_id: str) -> bool:
         with open(meta_path, "r") as f:
             meta = json.load(f)
         cached_at = meta.get("cached_at", 0)
-        if time_now() - cached_at < CACHE_TTL_SECONDS:
+        if time_now() - cached_at < DISK_CACHE_TTL:
             return True
     except (json.JSONDecodeError, OSError):
         pass
@@ -393,8 +396,8 @@ async def analyze_channel_web(
         return AnalysisResult(title=title, subscribers=subscribers)
 
     word_counter = Counter(all_words)
-    cloud_path = generate_main_cloud(channel_id, all_words, title)
-    graph_path = generate_top_words_chart(channel_id, word_counter, title)
+    cloud_path = await _run_sync(generate_main_cloud, channel_id, all_words, title)
+    graph_path = await _run_sync(generate_top_words_chart, channel_id, word_counter, title)
 
     mats_path = pos_path = agg_path = weekday_path = hour_path = None
     names_path = phrases_path = register_path = dichotomy_path = None
@@ -402,26 +405,27 @@ async def analyze_channel_web(
     unique_names_count = total_names_mentions = 0
 
     if not lite_mode:
-        mats_path = generate_mats_cloud(channel_id, mat_words, title)
-        pos_path = generate_sentiment_cloud(channel_id, pos_words, title, 'positive')
-        agg_path = generate_sentiment_cloud(channel_id, agg_words, title, 'aggressive')
+        mats_path = await _run_sync(generate_mats_cloud, channel_id, mat_words, title)
+        pos_path = await _run_sync(generate_sentiment_cloud, channel_id, pos_words, title, 'positive')
+        agg_path = await _run_sync(generate_sentiment_cloud, channel_id, agg_words, title, 'aggressive')
 
         weekday_counts = Counter(date.astimezone(MOSCOW_TZ).weekday() for date, _ in posts)
-        weekday_path = generate_weekday_chart(channel_id, dict(weekday_counts), title)
+        weekday_path = await _run_sync(generate_weekday_chart, channel_id, dict(weekday_counts), title)
         hour_counts = Counter(date.astimezone(MOSCOW_TZ).hour for date, _ in posts)
-        hour_path = generate_hour_chart(channel_id, dict(hour_counts), title)
+        hour_path = await _run_sync(generate_hour_chart, channel_id, dict(hour_counts), title)
 
         names_counter = Counter(names)
         unique_names_count = len(names_counter)
         total_names_mentions = len(names)
-        names_path = generate_names_chart(
+        names_path = await _run_sync(
+            generate_names_chart,
             channel_id, names_counter.most_common(100), title,
             total_unique_names=unique_names_count, total_mentions=total_names_mentions
         )
 
         all_texts = [text for _, text in posts]
         top_phrases = extract_phrases(all_texts, n=3)[:10]
-        phrases_path = generate_phrases_chart(channel_id, top_phrases, title)
+        phrases_path = await _run_sync(generate_phrases_chart, channel_id, top_phrases, title)
 
         caps_words: list[str] = []
         lower_words: list[str] = []
@@ -437,14 +441,16 @@ async def analyze_channel_web(
 
         caps_percent = (len(caps_words) / total_register_words * 100) if total_register_words > 0 else 0
         lower_percent = (len(lower_words) / total_register_words * 100) if total_register_words > 0 else 0
-        register_path = generate_register_cloud(
+        register_path = await _run_sync(
+            generate_register_cloud,
             channel_id, caps_words, lower_words, title, caps_percent, lower_percent
         )
 
         dichotomy_total = len(metaphysics_words_list) + len(everyday_words_list)
         meta_percent = (len(metaphysics_words_list) / dichotomy_total * 100) if dichotomy_total > 0 else 0
         everyday_percent = (len(everyday_words_list) / dichotomy_total * 100) if dichotomy_total > 0 else 0
-        dichotomy_path = generate_dichotomy_cloud(
+        dichotomy_path = await _run_sync(
+            generate_dichotomy_cloud,
             channel_id, metaphysics_words_list, everyday_words_list, title, meta_percent, everyday_percent
         )
 
@@ -538,6 +544,10 @@ async def analyze_channel(
 
         logger.info(f"Начат анализ канала: {channel}")
 
+        # Если channel — числовая строка, преобразуем в int (Telethon иначе считает это телефоном)
+        if isinstance(channel, str) and channel.isdigit():
+            channel = int(channel)
+
         # Получение данных канала с fallback
         entity = None
         try:
@@ -547,8 +557,9 @@ async def analyze_channel(
             else:
                 entity = await client.get_entity(channel)
         except ValueError as e:
+            error_msg = str(e)
             # Если не удалось найти по ID, пробуем как username
-            if "Could not find the input entity" in str(e):
+            if "Could not find the input entity" in error_msg:
                 if is_private:
                     logger.warning(f"Приватный канал {channel} не найден после присоединения")
                     raise AnalysisError(f"Нет доступа к приватному каналу или ссылка истекла")
@@ -561,6 +572,8 @@ async def analyze_channel(
                             entity = await client.get_entity(clean_channel)
                         except (ValueError, UsernameNotOccupiedError, UsernameInvalidError):
                             pass
+            elif "No user has" in error_msg:
+                raise AnalysisError("Канал не найден. Проверьте правильность юзернейма.") from e
             if entity is None:
                 raise
 
@@ -584,8 +597,8 @@ async def analyze_channel(
                     messages.append(m)
                 msg_count += 1
                 # Пауза каждые N сообщений для снижения нагрузки на API
-                if msg_count % MESSAGES_DELAY_INTERVAL == 0:
-                    await asyncio.sleep(MESSAGES_DELAY_SECONDS)
+                if msg_count % FETCH_DELAY_EVERY_N == 0:
+                    await asyncio.sleep(FETCH_DELAY_SECONDS)
         except Exception as e:
             error_str = str(e).lower()
             if "restricted" in error_str or "api access" in error_str or "bot users" in error_str:
@@ -657,8 +670,8 @@ async def analyze_channel(
         word_counter = Counter(all_words)
 
         # Основные визуализации (всегда создаются)
-        cloud_path = generate_main_cloud(channel_id, all_words, title)
-        graph_path = generate_top_words_chart(channel_id, word_counter, title)
+        cloud_path = await _run_sync(generate_main_cloud, channel_id, all_words, title)
+        graph_path = await _run_sync(generate_top_words_chart, channel_id, word_counter, title)
 
         # Инициализация путей для полного анализа
         mats_path = None
@@ -679,24 +692,25 @@ async def analyze_channel(
             logger.info(f"Lite-анализ канала {channel_id} (облако + топ-15)")
         else:
             # FULL MODE: все визуализации
-            mats_path = generate_mats_cloud(channel_id, mat_words, title)
-            pos_path = generate_sentiment_cloud(channel_id, pos_words, title, 'positive')
-            agg_path = generate_sentiment_cloud(channel_id, agg_words, title, 'aggressive')
+            mats_path = await _run_sync(generate_mats_cloud, channel_id, mat_words, title)
+            pos_path = await _run_sync(generate_sentiment_cloud, channel_id, pos_words, title, 'positive')
+            agg_path = await _run_sync(generate_sentiment_cloud, channel_id, agg_words, title, 'aggressive')
 
             # Статистика по дням недели (количество постов)
             weekday_counts = Counter(date.astimezone(MOSCOW_TZ).weekday() for date, _ in posts)
-            weekday_path = generate_weekday_chart(channel_id, dict(weekday_counts), title)
+            weekday_path = await _run_sync(generate_weekday_chart, channel_id, dict(weekday_counts), title)
 
             # Статистика по часам
             hour_counts = Counter((date.astimezone(MOSCOW_TZ)).hour for date, _ in posts)
-            hour_path = generate_hour_chart(channel_id, dict(hour_counts), title)
+            hour_path = await _run_sync(generate_hour_chart, channel_id, dict(hour_counts), title)
 
             # Имена и личности
             names_counter = Counter(names)
             unique_names_count = len(names_counter)
             total_names_mentions = len(names)
             top_names = names_counter.most_common(100)
-            names_path = generate_names_chart(
+            names_path = await _run_sync(
+                generate_names_chart,
                 channel_id, top_names, title,
                 total_unique_names=unique_names_count,
                 total_mentions=total_names_mentions
@@ -705,7 +719,7 @@ async def analyze_channel(
             # Фразы (триграммы) с фильтрацией
             all_texts = [text for _, text in posts]
             top_phrases = extract_phrases(all_texts, n=3)[:10]
-            phrases_path = generate_phrases_chart(channel_id, top_phrases, title)
+            phrases_path = await _run_sync(generate_phrases_chart, channel_id, top_phrases, title)
 
             # Облако регистра (CAPS vs lowercase)
             caps_words: list[str] = []
@@ -727,7 +741,8 @@ async def analyze_channel(
             lower_percent = (len(lower_words) / total_register_words * 100) if total_register_words > 0 else 0
 
             # Генерируем облако регистра
-            register_path = generate_register_cloud(
+            register_path = await _run_sync(
+                generate_register_cloud,
                 channel_id, caps_words, lower_words, title,
                 caps_percent, lower_percent
             )
@@ -736,7 +751,8 @@ async def analyze_channel(
             dichotomy_total = len(metaphysics_words) + len(everyday_words)
             meta_percent = (len(metaphysics_words) / dichotomy_total * 100) if dichotomy_total > 0 else 0
             everyday_percent = (len(everyday_words) / dichotomy_total * 100) if dichotomy_total > 0 else 0
-            dichotomy_path = generate_dichotomy_cloud(
+            dichotomy_path = await _run_sync(
+                generate_dichotomy_cloud,
                 channel_id, metaphysics_words, everyday_words, title,
                 meta_percent, everyday_percent
             )
@@ -795,7 +811,7 @@ async def analyze_channel(
         return result
 
     except FloodWaitError:
-        raise  # Пробрасываем для обработки в handlers.py
+        raise  # Пробрасываем для обработки в handlers
 
     except Exception as e:
         logger.error(f"Ошибка анализа канала {channel}: {e}")

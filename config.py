@@ -30,9 +30,9 @@ LOG_LEVEL: Final[int] = logging.INFO
 API_ID: Final[int] = int(os.getenv("API_ID", "0"))
 API_HASH: Final[str] = os.getenv("API_HASH", "")
 BOT_TOKEN: Final[str] = os.getenv("BOT_TOKEN", "")
-SESSION_NAME: Final[str] = os.getenv("SESSION_NAME", "ltdnt_session")
-BACKUP_SESSION_NAME: Final[str] = os.getenv("BACKUP_SESSION_NAME", "kristina_user")
-THIRD_SESSION_NAME: Final[str] = os.getenv("THIRD_SESSION_NAME", "211766470_telethon")
+SESSION_NAME: Final[str] = os.getenv("SESSION_NAME", "")
+BACKUP_SESSION_NAME: Final[str] = os.getenv("BACKUP_SESSION_NAME", "")
+THIRD_SESSION_NAME: Final[str] = os.getenv("THIRD_SESSION_NAME", "")
 
 # --- Прокси для избежания FloodWait (опционально) ---
 # Формат: socks5://user:pass@host:port или socks5://host:port или http://host:port
@@ -147,10 +147,29 @@ DEFAULT_MESSAGE_LIMIT: Final[int] = 500  # Полный анализ (платн
 FREE_MESSAGE_LIMIT: Final[int] = 150     # Облегчённый анализ (бесплатные пользователи)
 ADMIN_MESSAGE_LIMIT: Final[int] = 800    # Расширенный анализ (админы)
 
+# --- Тайминги и кэш ---
+RATE_LIMIT_SECONDS: Final[int] = 600            # Между запросами пользователя
+FLOODWAIT_PENALTY_SECONDS: Final[int] = 3600    # После FloodWait для пользователя
+CACHE_TTL_LITE: Final[int] = 1800               # In-memory кэш lite (30 мин)
+CACHE_TTL_FULL: Final[int] = 7200               # In-memory кэш full (2 часа)
+DISK_CACHE_TTL: Final[int] = 43200              # Дисковый кэш (12 часов)
+DISK_CACHE_TTL_LITE: Final[int] = 86400         # Дисковый кэш lite (24 часа)
+FETCH_DELAY_EVERY_N: Final[int] = 30            # Пауза каждые N сообщений
+FETCH_DELAY_SECONDS: Final[float] = 2.0         # Длительность паузы
+PENDING_CHECK_INTERVAL: Final[int] = 120        # Проверка pending каждые 2 мин
+
+
+# --- Администраторы ---
+_admin_ids_str = os.getenv("ADMIN_IDS", "26643106,6856259901")
+ADMIN_IDS: Final[set[int]] = set(int(x.strip()) for x in _admin_ids_str.split(",") if x.strip())
+ADMIN_ID: Final[int] = int(os.getenv("ADMIN_ID", "26643106"))
+
 
 def validate_config() -> bool:
     """Проверяет наличие обязательных настроек."""
     if not API_ID or not API_HASH or not BOT_TOKEN:
         logging.error("Не заданы API_ID, API_HASH или BOT_TOKEN. Проверьте .env файл.")
         return False
+    if not SESSION_NAME:
+        logging.warning("SESSION_NAME не задан. Укажите имя сессии в .env файле.")
     return True

@@ -16,7 +16,7 @@ from bs4 import BeautifulSoup
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-DB_PATH = Path(__file__).resolve().parent.parent / "users.db"
+DB_PATH = Path(__file__).resolve().parent.parent.parent / "users.db"
 
 
 def fetch_channel_keys() -> list[tuple[str, int]]:

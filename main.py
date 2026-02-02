@@ -32,9 +32,11 @@ from config import (
 )
 from handlers import router, set_bot_instance
 from client_pool import get_client_pool, init_client_pool
-from db import init_db, ADMIN_ID
+from config import ADMIN_ID, ADMIN_IDS, CACHE_TTL_FULL, PENDING_CHECK_INTERVAL, FREE_MESSAGE_LIMIT, DEFAULT_MESSAGE_LIMIT
+from db import init_db, check_user_access, consume_analysis, update_pending_status, remove_pending_analysis, get_db_connection, cleanup_old_records, DB_PATH
 from metrics import setup_metrics_endpoint, init_metrics, update_account_metrics, update_cache_metrics
-import sqlite3
+from utils import format_number, get_bot_stats
+from handlers.common import cleanup_rate_limits
 
 
 def setup_logging() -> None:
@@ -67,26 +69,14 @@ async def update_bot_description(bot: Bot, logger: logging.Logger) -> None:
 
             # Получаем статистику
             try:
-                conn = sqlite3.connect("users.db", timeout=5.0)
-                cursor = conn.cursor()
-                cursor.execute("SELECT COUNT(*) FROM users")
-                total_users = cursor.fetchone()[0]
-                cursor.execute("SELECT COUNT(*) FROM channel_stats")
-                total_channels = cursor.fetchone()[0]
-                cursor.execute("SELECT SUM(analysis_count) FROM channel_stats")
-                result = cursor.fetchone()
-                total_analyses = result[0] if result and result[0] else 0
-                conn.close()
-            except sqlite3.Error as db_error:
+                stats = get_bot_stats()
+                total_users = stats["total_users"]
+                total_channels = stats["total_channels"]
+                total_analyses = stats["total_analyses"]
+            except Exception as db_error:
                 logger.error(f"Ошибка доступа к БД при обновлении описания: {db_error}", exc_info=True)
                 await asyncio.sleep(60)
                 continue
-
-            # Форматируем числа
-            def format_number(n: int) -> str:
-                if n >= 1000:
-                    return f"{n/1000:.1f}K".replace(".0K", "K")
-                return str(n)
 
             # Обновляем short_description (показывается в шапке)
             short_desc = (
@@ -109,73 +99,219 @@ async def update_bot_description(bot: Bot, logger: logging.Logger) -> None:
             await asyncio.sleep(60)
 
 
-async def auto_process_pending_analyses(bot: Bot, logger: logging.Logger) -> None:
-    """
-    Фоновая задача для уведомления пользователей о pending анализах.
-    Запускается каждые 5 минут. Уведомляет пользователей, что они могут повторить запрос.
-    """
+async def periodic_cleanup_rate_limits(logger: logging.Logger) -> None:
+    """Фоновая задача: очистка устаревших записей рейт-лимитов каждые 10 минут."""
     while True:
         try:
-            # Ждём 5 минут перед проверкой
-            await asyncio.sleep(300)
+            await asyncio.sleep(600)  # 10 минут
+            removed = cleanup_rate_limits()
+            if removed > 0:
+                logger.info(f"Очищено {removed} устаревших записей рейт-лимитов")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Ошибка очистки рейт-лимитов: {e}")
+            await asyncio.sleep(60)
 
-            # Получаем старые pending анализы (старше 10 минут)
-            conn = sqlite3.connect("users.db")
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT id, user_id, channel_username
-                FROM pending_analyses
-                WHERE status = 'pending'
-                AND created_at < datetime('now', '-10 minutes')
-                ORDER BY created_at ASC
-                LIMIT 5
-            """)
-            pending_list = cursor.fetchall()
-            conn.close()
+
+async def periodic_cleanup_disk_cache(logger: logging.Logger) -> None:
+    """Фоновая задача: удаление файлов дискового кэша старше 7 дней, каждые 6 часов."""
+    import shutil
+    from pathlib import Path
+    from time import time as time_now
+
+    cache_dir = Path("cache")
+    max_age_seconds = 7 * 24 * 3600  # 7 дней
+
+    while True:
+        try:
+            await asyncio.sleep(6 * 3600)  # 6 часов
+            if not cache_dir.exists():
+                continue
+
+            now = time_now()
+            removed = 0
+            for entry in cache_dir.iterdir():
+                if entry.is_dir():
+                    # Проверяем возраст по meta.json или mtime директории
+                    try:
+                        mtime = entry.stat().st_mtime
+                        if now - mtime > max_age_seconds:
+                            shutil.rmtree(entry)
+                            removed += 1
+                    except OSError:
+                        pass
+
+            if removed > 0:
+                logger.info(f"Очищено {removed} устаревших записей дискового кэша")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Ошибка очистки дискового кэша: {e}")
+            await asyncio.sleep(60)
+
+
+async def periodic_cleanup_old_db_records(logger: logging.Logger) -> None:
+    """Фоновая задача: удаление старых floodwait_events (>30 дней), каждые 24 часа."""
+    while True:
+        try:
+            await asyncio.sleep(24 * 3600)  # 24 часа
+            deleted = cleanup_old_records(days=30)
+            if deleted > 0:
+                logger.info(f"Очищено {deleted} старых записей floodwait_events из БД")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Ошибка очистки старых записей БД: {e}")
+            await asyncio.sleep(60)
+
+
+async def _send_analysis_result(bot: Bot, user_id: int, result, use_lite: bool, channel: str) -> None:
+    """Отправляет результат анализа пользователю напрямую через bot API."""
+    from aiogram.types import InputMediaPhoto, FSInputFile
+    import html as html_module
+
+    safe_title = html_module.escape(result.title or str(channel))
+
+    if use_lite:
+        caption = (
+            f"📊 <b>{safe_title}</b>\n\n"
+            f"📚 Уникальных слов: {result.stats.unique_count}\n"
+            f"📏 Средняя длина поста: {result.stats.avg_len} слов\n\n"
+            f"<i>Это превью. Полный анализ доступен за ⭐</i>"
+        )
+    else:
+        caption = (
+            f"📊 Канал: {safe_title}\n\n"
+            f"📚 Уникальных слов: {result.stats.unique_count}\n"
+            f"📏 Средняя длина поста: {result.stats.avg_len} слов\n"
+            f"👤 Упомянуто личностей: {result.stats.unique_names_count} "
+            f"({result.stats.total_names_mentions} упоминаний)"
+        )
+
+    media = []
+    if result.cloud_path and os.path.exists(result.cloud_path):
+        media.append(InputMediaPhoto(media=FSInputFile(result.cloud_path), caption=caption, parse_mode="HTML"))
+
+    optional_paths = [
+        result.graph_path, result.mats_path, result.positive_path,
+        result.aggressive_path, result.weekday_path, result.hour_path,
+        result.names_path, result.phrases_path, result.dichotomy_path,
+    ]
+    for path in optional_paths:
+        if path and os.path.exists(path):
+            media.append(InputMediaPhoto(media=FSInputFile(path)))
+
+    if not media:
+        await bot.send_message(user_id, f"Анализ {channel} завершён, но не удалось сформировать изображения.")
+        return
+
+    await bot.send_media_group(chat_id=user_id, media=media)
+
+    if use_lite:
+        await bot.send_message(
+            user_id,
+            f"✅ Ваш анализ `{channel}` готов!\n\n"
+            "💎 Хотите полный анализ? Напишите /buy",
+            parse_mode="Markdown",
+        )
+    elif result.top_emojis:
+        emoji_text = f"🔥 Топ-20 эмодзи канала {result.title}\n\n"
+        for emo, count in result.top_emojis:
+            emoji_text += f"{emo} x {count}\n"
+        await bot.send_message(user_id, emoji_text)
+
+    # Удаление временных файлов
+    for path in result.get_all_paths():
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
+
+
+async def auto_process_pending_analyses(bot: Bot, logger: logging.Logger) -> None:
+    """Фоновая задача: автоматически выполняет pending анализы."""
+    from aiogram.exceptions import TelegramForbiddenError
+
+    while True:
+        try:
+            await asyncio.sleep(PENDING_CHECK_INTERVAL)
+
+            pool = get_client_pool()
+            pool_status = pool.status()
+            if pool_status.get('available_accounts', 0) == 0:
+                continue  # Нет свободных аккаунтов — ждём
+
+            # Берём pending (старше 2 мин, чтобы не конфликтовать с текущим запросом)
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT id, user_id, channel_key, channel_username
+                    FROM pending_analyses
+                    WHERE status = 'pending'
+                    AND created_at < datetime('now', '-2 minutes')
+                    ORDER BY created_at ASC
+                    LIMIT 3
+                """)
+                pending_list = cursor.fetchall()
 
             if not pending_list:
                 continue
 
-            logger.info(f"🔄 Найдено {len(pending_list)} старых pending анализов")
+            logger.info(f"🔄 Auto-retry: найдено {len(pending_list)} pending анализов")
 
-            # Проверяем доступность клиента для анализа
-            pool = get_client_pool()
-            pool_status = pool.status()
-            has_available_account = pool_status.get('available_accounts', 0) > 0
+            for analysis_id, user_id, channel_key, channel_username in pending_list:
+                # Ставим статус 'processing' чтобы не взять повторно
+                update_pending_status(analysis_id, 'processing')
 
-            for analysis_id, user_id, channel_username in pending_list:
                 try:
-                    if has_available_account:
-                        # Уведомляем пользователя что можно повторить запрос
-                        await bot.send_message(
-                            user_id,
-                            f"✅ *Бот снова доступен!*\n\n"
-                            f"Ваш запрос на анализ `{channel_username}` не был выполнен ранее.\n"
-                            f"Отправьте название канала ещё раз для анализа.",
-                            parse_mode="Markdown"
-                        )
+                    # Проверяем доступ пользователя
+                    access = check_user_access(user_id)
+                    if not access.can_analyze:
+                        update_pending_status(analysis_id, 'skipped')
+                        continue
 
-                    # Удаляем из очереди (пользователь должен сам повторить)
-                    conn = sqlite3.connect("users.db")
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        UPDATE pending_analyses
-                        SET status = 'notified'
-                        WHERE id = ?
-                    """, (analysis_id,))
-                    conn.commit()
-                    conn.close()
+                    # Определяем режим
+                    is_paid = access.paid_balance > 0 or access.is_premium or user_id in ADMIN_IDS
+                    use_lite = not is_paid
+                    msg_limit = FREE_MESSAGE_LIMIT if use_lite else DEFAULT_MESSAGE_LIMIT
 
-                    logger.info(f"📨 Уведомлён user={user_id} о канале @{channel_username}")
-                    await asyncio.sleep(2)  # Пауза между уведомлениями
+                    # Выполняем анализ
+                    result, error = await pool.analyze(
+                        channel_username, use_cache=True,
+                        user_id=user_id, lite_mode=use_lite,
+                        message_limit=msg_limit,
+                    )
 
-                except TelegramAPIError as e:
-                    logger.warning(f"Не удалось уведомить {user_id}: {e}")
+                    if error:
+                        if error.startswith("all_cooldown:"):
+                            # Снова cooldown — вернуть в pending
+                            update_pending_status(analysis_id, 'pending')
+                            break  # Не пытаемся остальные
+                        else:
+                            update_pending_status(analysis_id, 'failed')
+                            logger.warning(f"Auto-retry failed: {channel_username}: {error}")
+                            continue
+
+                    # Отправляем результат пользователю
+                    await _send_analysis_result(bot, user_id, result, use_lite, channel_username)
+                    consume_analysis(user_id, access.reason)
+                    remove_pending_analysis(analysis_id)
+                    logger.info(f"✅ Auto-retry: {channel_username} → user {user_id}")
+
+                except TelegramForbiddenError:
+                    # Пользователь заблокировал бота
+                    remove_pending_analysis(analysis_id)
+                    logger.info(f"User {user_id} blocked bot, removing pending")
                 except Exception as e:
-                    logger.error(f"❌ Ошибка при обработке анализа {analysis_id}: {e}")
+                    update_pending_status(analysis_id, 'pending')
+                    logger.error(f"Auto-retry error: {e}")
+
+                await asyncio.sleep(5)  # Пауза между retry
 
         except Exception as e:
-            logger.error(f"❌ Ошибка в фоновой задаче auto_process_pending: {e}")
+            logger.error(f"auto_process_pending error: {e}")
             await asyncio.sleep(60)
 
 
@@ -198,7 +334,7 @@ async def main() -> None:
     set_bot_instance(bot)  # Для уведомлений из очереди
 
     # Инициализация ClientPool с кэшированием на 2 часа (снижение FloodWait)
-    pool = init_client_pool(cache_ttl=7200)
+    pool = init_client_pool(cache_ttl=CACHE_TTL_FULL)
 
     # Список клиентов для отключения в finally
     active_clients: list[TelegramClient] = []
@@ -312,24 +448,17 @@ async def main() -> None:
         # Запускаем фоновую задачу для обновления описания бота
         asyncio.create_task(update_bot_description(bot, logger))
 
+        # Запускаем фоновые задачи очистки
+        asyncio.create_task(periodic_cleanup_rate_limits(logger))
+        asyncio.create_task(periodic_cleanup_disk_cache(logger))
+        asyncio.create_task(periodic_cleanup_old_db_records(logger))
+
         # Обновляем описание сразу при старте
         try:
-            conn = sqlite3.connect("users.db", timeout=5.0)
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM users")
-            total_users = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM channel_stats")
-            total_channels = cursor.fetchone()[0]
-            cursor.execute("SELECT SUM(analysis_count) FROM channel_stats")
-            result = cursor.fetchone()
-            total_analyses = result[0] if result and result[0] else 0
-            conn.close()
-
-            # Форматируем числа (3000 → "3K")
-            def format_number(n: int) -> str:
-                if n >= 1000:
-                    return f"{n/1000:.1f}K".replace(".0K", "K")
-                return str(n)
+            stats = get_bot_stats()
+            total_users = stats["total_users"]
+            total_channels = stats["total_channels"]
+            total_analyses = stats["total_analyses"]
 
             short_desc = (
                 f"📊 Анализ Telegram-каналов\n"
@@ -338,8 +467,6 @@ async def main() -> None:
             )
             await bot.set_my_short_description(short_description=short_desc)
             logger.info(f"✅ Описание бота установлено: {total_users} users, {total_channels} channels, {total_analyses} analyses")
-        except sqlite3.Error as db_error:
-            logger.error(f"Ошибка БД при установке описания: {db_error}", exc_info=True)
         except TelegramAPIError as api_error:
             logger.error(f"Ошибка Telegram API: {api_error}", exc_info=True)
         except Exception as e:

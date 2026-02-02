@@ -10,6 +10,8 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 from dataclasses import dataclass, asdict
 
+from config import ADMIN_ID, ADMIN_IDS
+
 logger = logging.getLogger(__name__)
 
 # Путь к базе данных
@@ -19,15 +21,11 @@ DB_PATH = Path(__file__).parent / "users.db"
 @contextmanager
 def get_db_connection():
     """Контекстный менеджер для безопасной работы с БД."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     try:
         yield conn
     finally:
         conn.close()
-
-# ID администраторов
-ADMIN_ID = 26643106  # Основной админ (для уведомлений)
-ADMIN_IDS = {26643106, 6856259901}  # Все админы (для доступа к /admin)
 
 # Лимиты
 # Бесплатный анализ для виральности (если нет очереди)
@@ -52,193 +50,170 @@ class UserStatus:
 def init_db() -> None:
     """Инициализирует базу данных и создаёт таблицы."""
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
 
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                request_count INTEGER DEFAULT 0,
-                first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                daily_requests_count INTEGER DEFAULT 0,
-                last_request_date DATE,
-                paid_balance INTEGER DEFAULT 0,
-                premium_until TIMESTAMP
-            )
-        """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    request_count INTEGER DEFAULT 0,
+                    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    daily_requests_count INTEGER DEFAULT 0,
+                    last_request_date DATE,
+                    paid_balance INTEGER DEFAULT 0,
+                    premium_until TIMESTAMP
+                )
+            """)
 
-        # Таблица кэша анализов каналов
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS channel_cache (
-                channel_key TEXT PRIMARY KEY,
-                title TEXT,
-                stats_json TEXT,
-                top_emojis_json TEXT,
-                cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+            # Таблица кэша анализов каналов
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS channel_cache (
+                    channel_key TEXT PRIMARY KEY,
+                    title TEXT,
+                    stats_json TEXT,
+                    top_emojis_json TEXT,
+                    cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
-        # Таблица статистики анализов каналов
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS channel_stats (
-                channel_key TEXT PRIMARY KEY,
-                title TEXT,
-                analysis_count INTEGER DEFAULT 1,
-                last_analyzed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                subscribers INTEGER DEFAULT 0,
-                analyzed_by INTEGER
-            )
-        """)
+            # Таблица статистики анализов каналов
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS channel_stats (
+                    channel_key TEXT PRIMARY KEY,
+                    title TEXT,
+                    analysis_count INTEGER DEFAULT 1,
+                    last_analyzed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    subscribers INTEGER DEFAULT 0,
+                    analyzed_by INTEGER
+                )
+            """)
 
-        # Таблица событий FloodWait / перегрузки
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS floodwait_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                channel_key TEXT,
-                reason TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+            # Таблица событий FloodWait / перегрузки
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS floodwait_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    channel_key TEXT,
+                    reason TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
-        # Таблица незавершённых анализов (для переотправки при ошибках)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS pending_analyses (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                channel_key TEXT,
-                channel_username TEXT,
-                status TEXT DEFAULT 'pending',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(user_id, channel_key)
-            )
-        """)
+            # Таблица незавершённых анализов (для переотправки при ошибках)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS pending_analyses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    channel_key TEXT,
+                    channel_username TEXT,
+                    status TEXT DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, channel_key)
+                )
+            """)
 
-        # Таблица платежей (история всех платежей)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS payments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                amount INTEGER,
-                stars INTEGER,
-                payment_method TEXT,
-                status TEXT DEFAULT 'completed',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                notes TEXT
-            )
-        """)
+            # Таблица платежей (история всех платежей)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS payments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    amount INTEGER,
+                    stars INTEGER,
+                    payment_method TEXT,
+                    status TEXT DEFAULT 'completed',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    notes TEXT
+                )
+            """)
 
-        # Таблица кликов по кнопкам покупки (воронка)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS buy_clicks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                action TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+            # Таблица кликов по кнопкам покупки (воронка)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS buy_clicks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    action TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
-        # Миграция: добавляем новые колонки если их нет
-        cursor.execute("PRAGMA table_info(users)")
-        columns = [col[1] for col in cursor.fetchall()]
+            # Миграция: добавляем новые колонки если их нет
+            cursor.execute("PRAGMA table_info(users)")
+            columns = [col[1] for col in cursor.fetchall()]
 
-        if 'daily_requests_count' not in columns:
-            cursor.execute("ALTER TABLE users ADD COLUMN daily_requests_count INTEGER DEFAULT 0")
-        if 'last_request_date' not in columns:
-            cursor.execute("ALTER TABLE users ADD COLUMN last_request_date DATE")
-        if 'paid_balance' not in columns:
-            cursor.execute("ALTER TABLE users ADD COLUMN paid_balance INTEGER DEFAULT 0")
-        if 'premium_until' not in columns:
-            cursor.execute("ALTER TABLE users ADD COLUMN premium_until TIMESTAMP")
+            if 'daily_requests_count' not in columns:
+                cursor.execute("ALTER TABLE users ADD COLUMN daily_requests_count INTEGER DEFAULT 0")
+            if 'last_request_date' not in columns:
+                cursor.execute("ALTER TABLE users ADD COLUMN last_request_date DATE")
+            if 'paid_balance' not in columns:
+                cursor.execute("ALTER TABLE users ADD COLUMN paid_balance INTEGER DEFAULT 0")
+            if 'premium_until' not in columns:
+                cursor.execute("ALTER TABLE users ADD COLUMN premium_until TIMESTAMP")
 
-        # Миграция channel_stats: добавляем колонки subscribers и analyzed_by
-        cursor.execute("PRAGMA table_info(channel_stats)")
-        cs_columns = [col[1] for col in cursor.fetchall()]
-        if 'subscribers' not in cs_columns:
-            cursor.execute("ALTER TABLE channel_stats ADD COLUMN subscribers INTEGER DEFAULT 0")
-        if 'analyzed_by' not in cs_columns:
-            cursor.execute("ALTER TABLE channel_stats ADD COLUMN analyzed_by INTEGER")
-        
-        # Миграция users: добавляем реферальную систему
-        if 'referred_by' not in columns:
-            cursor.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
-        if 'referral_count' not in columns:
-            cursor.execute("ALTER TABLE users ADD COLUMN referral_count INTEGER DEFAULT 0")
+            # Миграция channel_stats: добавляем колонки subscribers и analyzed_by
+            cursor.execute("PRAGMA table_info(channel_stats)")
+            cs_columns = [col[1] for col in cursor.fetchall()]
+            if 'subscribers' not in cs_columns:
+                cursor.execute("ALTER TABLE channel_stats ADD COLUMN subscribers INTEGER DEFAULT 0")
+            if 'analyzed_by' not in cs_columns:
+                cursor.execute("ALTER TABLE channel_stats ADD COLUMN analyzed_by INTEGER")
 
-        # Индексы для floodwait_events
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_floodwait_created_at ON floodwait_events(created_at)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_floodwait_user ON floodwait_events(user_id)")
+            # Индексы для floodwait_events
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_floodwait_created_at ON floodwait_events(created_at)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_floodwait_user ON floodwait_events(user_id)")
 
-        # Индексы для ускорения запросов
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_last_request ON users(last_request_date)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_premium ON users(premium_until)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_channel_stats_subs ON channel_stats(subscribers)")
+            # Индексы для ускорения запросов
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_last_request ON users(last_request_date)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_premium ON users(premium_until)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_channel_stats_subs ON channel_stats(subscribers)")
 
-        conn.commit()
-        conn.close()
-        logger.info(f"База данных инициализирована: {DB_PATH}")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_payments_user_id ON payments(user_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_payments_created_at ON payments(created_at)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pending_user_id ON pending_analyses(user_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_buy_clicks_user_id ON buy_clicks(user_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_buy_clicks_created_at ON buy_clicks(created_at)")
+
+            conn.commit()
+            logger.info(f"База данных инициализирована: {DB_PATH}")
 
     except sqlite3.Error as e:
         logger.error(f"Ошибка инициализации БД: {e}")
 
 
-def register_user(user_id: int, username: str | None, referred_by: int | None = None) -> bool:
+def register_user(user_id: int, username: str | None) -> bool:
     """Регистрирует нового пользователя или обновляет username.
-    
+
     Args:
         user_id: ID пользователя
         username: Username пользователя
-        referred_by: ID реферера (если есть)
-    
+
     Returns:
         True если это новый пользователь, False если уже существует
     """
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        # Проверяем существует ли пользователь
-        cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
-        existing = cursor.fetchone()
-        
-        if existing:
-            # Просто обновляем username
-            cursor.execute("""
-                UPDATE users SET username = ? WHERE user_id = ?
-            """, (username, user_id))
-            conn.commit()
-            conn.close()
-            return False
-        
-        # Новый пользователь
-        cursor.execute("""
-            INSERT INTO users (user_id, username, request_count, first_seen, referred_by)
-            VALUES (?, ?, 0, ?, ?)
-        """, (user_id, username, datetime.now(), referred_by))
-        
-        # Если есть реферер - начисляем бонусы
-        if referred_by and referred_by != user_id:
-            # +1 анализ рефереру
-            cursor.execute("""
-                UPDATE users 
-                SET paid_balance = paid_balance + 1,
-                    referral_count = referral_count + 1
-                WHERE user_id = ?
-            """, (referred_by,))
-            
-            # +1 анализ новому пользователю
-            cursor.execute("""
-                UPDATE users 
-                SET paid_balance = paid_balance + 1
-                WHERE user_id = ?
-            """, (user_id,))
-            
-            logger.info(f"🎁 Реферальный бонус: {referred_by} пригласил {user_id}, оба получили +1 анализ")
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
 
-        conn.commit()
-        conn.close()
-        return True
+            # Проверяем существует ли пользователь
+            cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
+            existing = cursor.fetchone()
+
+            if existing:
+                # Просто обновляем username
+                cursor.execute("""
+                    UPDATE users SET username = ? WHERE user_id = ?
+                """, (username, user_id))
+                conn.commit()
+                return False
+
+            # Новый пользователь
+            cursor.execute("""
+                INSERT INTO users (user_id, username, request_count, first_seen)
+                VALUES (?, ?, 0, ?)
+            """, (user_id, username, datetime.now()))
+
+            conn.commit()
+            return True
 
     except sqlite3.Error as e:
         logger.error(f"Ошибка регистрации пользователя {user_id}: {e}")
@@ -269,16 +244,15 @@ def check_user_access(user_id: int) -> UserStatus:
         )
 
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
 
-        cursor.execute("""
-            SELECT daily_requests_count, last_request_date, paid_balance, premium_until
-            FROM users WHERE user_id = ?
-        """, (user_id,))
+            cursor.execute("""
+                SELECT daily_requests_count, last_request_date, paid_balance, premium_until
+                FROM users WHERE user_id = ?
+            """, (user_id,))
 
-        row = cursor.fetchone()
-        conn.close()
+            row = cursor.fetchone()
 
         if not row:
             # Новый пользователь — дать 1 бесплатный анализ в день
@@ -388,46 +362,45 @@ def consume_analysis(user_id: int, reason: str) -> bool:
         return True
 
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        today = date.today().isoformat()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            today = date.today().isoformat()
 
-        if reason in ("free", "free_daily"):
-            # Увеличиваем дневной счётчик
-            cursor.execute("""
-                UPDATE users
-                SET daily_requests_count = CASE
-                    WHEN last_request_date = ? THEN daily_requests_count + 1
-                    ELSE 1
-                END,
-                last_request_date = ?,
-                request_count = request_count + 1
-                WHERE user_id = ?
-            """, (today, today, user_id))
+            if reason in ("free", "free_daily"):
+                # Увеличиваем дневной счётчик
+                cursor.execute("""
+                    UPDATE users
+                    SET daily_requests_count = CASE
+                        WHEN last_request_date = ? THEN daily_requests_count + 1
+                        ELSE 1
+                    END,
+                    last_request_date = ?,
+                    request_count = request_count + 1
+                    WHERE user_id = ?
+                """, (today, today, user_id))
 
-        elif reason == "paid":
-            # Списываем с платного баланса (только если баланс > 0)
-            cursor.execute("""
-                UPDATE users
-                SET paid_balance = CASE
-                    WHEN paid_balance > 0 THEN paid_balance - 1
-                    ELSE 0
-                END,
-                request_count = request_count + 1
-                WHERE user_id = ? AND paid_balance > 0
-            """, (user_id,))
+            elif reason == "paid":
+                # Списываем с платного баланса (только если баланс > 0)
+                cursor.execute("""
+                    UPDATE users
+                    SET paid_balance = CASE
+                        WHEN paid_balance > 0 THEN paid_balance - 1
+                        ELSE 0
+                    END,
+                    request_count = request_count + 1
+                    WHERE user_id = ? AND paid_balance > 0
+                """, (user_id,))
 
-        elif reason == "premium":
-            # Premium — просто логируем
-            cursor.execute("""
-                UPDATE users
-                SET request_count = request_count + 1
-                WHERE user_id = ?
-            """, (user_id,))
+            elif reason == "premium":
+                # Premium — просто логируем
+                cursor.execute("""
+                    UPDATE users
+                    SET request_count = request_count + 1
+                    WHERE user_id = ?
+                """, (user_id,))
 
-        rows_updated = cursor.rowcount
-        conn.commit()
-        conn.close()
+            rows_updated = cursor.rowcount
+            conn.commit()
 
         if rows_updated == 0:
             logger.warning(f"consume_analysis: пользователь {user_id} не найден в БД! reason={reason}")
@@ -444,17 +417,16 @@ def consume_analysis(user_id: int, reason: str) -> bool:
 def add_paid_balance(user_id: int, amount: int) -> bool:
     """Добавляет платный баланс пользователю. Возвращает True при успехе."""
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
 
-        cursor.execute("""
-            UPDATE users SET paid_balance = COALESCE(paid_balance, 0) + ?
-            WHERE user_id = ?
-        """, (amount, user_id))
+            cursor.execute("""
+                UPDATE users SET paid_balance = COALESCE(paid_balance, 0) + ?
+                WHERE user_id = ?
+            """, (amount, user_id))
 
-        rows_updated = cursor.rowcount
-        conn.commit()
-        conn.close()
+            rows_updated = cursor.rowcount
+            conn.commit()
 
         if rows_updated == 0:
             logger.warning(f"add_paid_balance: пользователь {user_id} не найден в БД!")
@@ -468,22 +440,46 @@ def add_paid_balance(user_id: int, amount: int) -> bool:
         return False
 
 
+def process_pack_payment(user_id: int, pack_amount: int, stars: int, payment_method: str, notes: str) -> bool:
+    """Атомарно начисляет баланс и логирует платёж в одной транзакции."""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE users SET paid_balance = COALESCE(paid_balance, 0) + ? WHERE user_id = ?",
+                (pack_amount, user_id),
+            )
+            if cursor.rowcount == 0:
+                conn.rollback()
+                logger.warning(f"process_pack_payment: пользователь {user_id} не найден в БД!")
+                return False
+            cursor.execute(
+                "INSERT INTO payments (user_id, stars, amount, payment_method, status, notes) VALUES (?, ?, '', ?, 'completed', ?)",
+                (user_id, stars, payment_method, notes),
+            )
+            conn.commit()
+            logger.info(f"Платёж обработан: user_id={user_id}, pack={pack_amount}, stars={stars}, notes={notes}")
+            return True
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка process_pack_payment для {user_id}: {e}")
+        return False
+
+
 def set_premium(user_id: int, days: int) -> None:
     """Устанавливает premium статус на указанное количество дней."""
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
 
-        premium_until = datetime.now() + timedelta(days=days)
+            premium_until = datetime.now() + timedelta(days=days)
 
-        cursor.execute("""
-            UPDATE users SET premium_until = ?
-            WHERE user_id = ?
-        """, (premium_until.isoformat(), user_id))
+            cursor.execute("""
+                UPDATE users SET premium_until = ?
+                WHERE user_id = ?
+            """, (premium_until.isoformat(), user_id))
 
-        conn.commit()
-        conn.close()
-        logger.info(f"Premium установлен для {user_id} до {premium_until}")
+            conn.commit()
+            logger.info(f"Premium установлен для {user_id} до {premium_until}")
 
     except sqlite3.Error as e:
         logger.error(f"Ошибка установки premium для {user_id}: {e}")
@@ -492,49 +488,47 @@ def set_premium(user_id: int, days: int) -> None:
 def get_stats() -> dict:
     """Получает общую статистику использования бота."""
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=10.0)
-        cursor = conn.cursor()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
 
-        cursor.execute("SELECT COUNT(*) FROM users")
-        total_users = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM users")
+            total_users = cursor.fetchone()[0]
 
-        # Используем channel_stats как единый источник для общего числа анализов
-        cursor.execute("SELECT SUM(analysis_count) FROM channel_stats")
-        result = cursor.fetchone()
-        total_requests = result[0] if result and result[0] else 0
+            # Используем channel_stats как единый источник для общего числа анализов
+            cursor.execute("SELECT SUM(analysis_count) FROM channel_stats")
+            result = cursor.fetchone()
+            total_requests = result[0] if result and result[0] else 0
 
-        # Количество уникальных каналов
-        cursor.execute("SELECT COUNT(*) FROM channel_stats")
-        total_channels = cursor.fetchone()[0] or 0
+            # Количество уникальных каналов
+            cursor.execute("SELECT COUNT(*) FROM channel_stats")
+            total_channels = cursor.fetchone()[0] or 0
 
-        # Активный пользователь - тот, кто делал анализ в последние 30 дней
-        cursor.execute("""
-            SELECT COUNT(*) FROM users
-            WHERE last_request_date >= date('now', '-30 days')
-        """)
-        active_users = cursor.fetchone()[0]
+            # Активный пользователь - тот, кто делал анализ в последние 30 дней
+            cursor.execute("""
+                SELECT COUNT(*) FROM users
+                WHERE last_request_date >= date('now', '-30 days')
+            """)
+            active_users = cursor.fetchone()[0]
 
-        cursor.execute("SELECT COUNT(*) FROM users WHERE premium_until > datetime('now')")
-        premium_users = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM users WHERE premium_until > datetime('now')")
+            premium_users = cursor.fetchone()[0]
 
-        cursor.execute("SELECT SUM(paid_balance) FROM users")
-        result = cursor.fetchone()
-        total_paid_balance = result[0] if result and result[0] else 0
+            cursor.execute("SELECT SUM(paid_balance) FROM users")
+            result = cursor.fetchone()
+            total_paid_balance = result[0] if result and result[0] else 0
 
-        # Пользователи, которые покупали анализы
-        cursor.execute("SELECT COUNT(*) FROM users WHERE paid_balance > 0 OR premium_until > datetime('now')")
-        paid_users = cursor.fetchone()[0]
+            # Пользователи, которые покупали анализы
+            cursor.execute("SELECT COUNT(*) FROM users WHERE paid_balance > 0 OR premium_until > datetime('now')")
+            paid_users = cursor.fetchone()[0]
 
-        cursor.execute("""
-            SELECT user_id, username, request_count
-            FROM users
-            WHERE request_count > 0
-            ORDER BY request_count DESC
-            LIMIT 5
-        """)
-        top_users = cursor.fetchall()
-
-        conn.close()
+            cursor.execute("""
+                SELECT user_id, username, request_count
+                FROM users
+                WHERE request_count > 0
+                ORDER BY request_count DESC
+                LIMIT 5
+            """)
+            top_users = cursor.fetchall()
 
         return {
             "total_users": total_users,
@@ -549,18 +543,16 @@ def get_stats() -> dict:
 
     except sqlite3.Error as e:
         logger.error(f"Ошибка получения статистики: {e}", exc_info=True)
-        # Возвращаем последние известные значения вместо нулей
         # Попробуем хотя бы получить базовую статистику
         try:
-            conn = sqlite3.connect(DB_PATH, timeout=5.0)
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM users")
-            users_count = cursor.fetchone()[0]
-            cursor.execute("SELECT SUM(analysis_count) FROM channel_stats")
-            result = cursor.fetchone()
-            analyses_count = result[0] if result and result[0] else 0
-            conn.close()
-            
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM users")
+                users_count = cursor.fetchone()[0]
+                cursor.execute("SELECT SUM(analysis_count) FROM channel_stats")
+                result = cursor.fetchone()
+                analyses_count = result[0] if result and result[0] else 0
+
             return {
                 "total_users": users_count,
                 "total_requests": analyses_count,
@@ -593,12 +585,10 @@ def is_admin(user_id: int) -> bool:
 def get_all_user_ids() -> list[int]:
     """Возвращает список всех user_id из базы."""
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id FROM users")
-        result = [row[0] for row in cursor.fetchall()]
-        conn.close()
-        return result
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT user_id FROM users")
+            return [row[0] for row in cursor.fetchall()]
     except sqlite3.Error as e:
         logger.error(f"Ошибка получения user_id: {e}")
         return []
@@ -607,12 +597,10 @@ def get_all_user_ids() -> list[int]:
 def get_paid_user_ids() -> list[int]:
     """Возвращает список user_id с paid_balance > 0."""
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id FROM users WHERE paid_balance > 0")
-        result = [row[0] for row in cursor.fetchall()]
-        conn.close()
-        return result
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT user_id FROM users WHERE paid_balance > 0")
+            return [row[0] for row in cursor.fetchall()]
     except sqlite3.Error as e:
         logger.error(f"Ошибка получения платных user_id: {e}")
         return []
@@ -621,21 +609,20 @@ def get_paid_user_ids() -> list[int]:
 def log_channel_analysis(channel_key: str, title: str, subscribers: int = 0, analyzed_by: int | None = None) -> None:
     """Записывает анализ канала в статистику."""
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO channel_stats (channel_key, title, analysis_count, last_analyzed, subscribers, analyzed_by)
-            VALUES (?, ?, 1, datetime('now'), ?, ?)
-            ON CONFLICT(channel_key) DO UPDATE SET
-                title = excluded.title,
-                analysis_count = analysis_count + 1,
-                last_analyzed = datetime('now'),
-                subscribers = excluded.subscribers,
-                analyzed_by = excluded.analyzed_by
-        """, (channel_key.lower(), title, subscribers, analyzed_by))
-        conn.commit()
-        conn.close()
-        logger.info(f"Статистика канала записана: {channel_key}, title={title}, subscribers={subscribers}, analyzed_by={analyzed_by}")
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO channel_stats (channel_key, title, analysis_count, last_analyzed, subscribers, analyzed_by)
+                VALUES (?, ?, 1, datetime('now'), ?, ?)
+                ON CONFLICT(channel_key) DO UPDATE SET
+                    title = excluded.title,
+                    analysis_count = analysis_count + 1,
+                    last_analyzed = datetime('now'),
+                    subscribers = excluded.subscribers,
+                    analyzed_by = excluded.analyzed_by
+            """, (channel_key.lower(), title, subscribers, analyzed_by))
+            conn.commit()
+            logger.info(f"Статистика канала записана: {channel_key}, title={title}, subscribers={subscribers}, analyzed_by={analyzed_by}")
     except sqlite3.Error as e:
         logger.error(f"Ошибка записи статистики канала {channel_key}: {e}")
 
@@ -643,18 +630,16 @@ def log_channel_analysis(channel_key: str, title: str, subscribers: int = 0, ana
 def get_top_channels(limit: int = 5) -> list[tuple[str, str, int]]:
     """Возвращает топ каналов по количеству анализов."""
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT channel_key, title, analysis_count
-            FROM channel_stats
-            WHERE analysis_count > 0
-            ORDER BY analysis_count DESC
-            LIMIT ?
-        """, (limit,))
-        result = cursor.fetchall()
-        conn.close()
-        return result
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT channel_key, title, analysis_count
+                FROM channel_stats
+                WHERE analysis_count > 0
+                ORDER BY analysis_count DESC
+                LIMIT ?
+            """, (limit,))
+            return cursor.fetchall()
     except sqlite3.Error as e:
         logger.error(f"Ошибка получения топ каналов: {e}")
         return []
@@ -663,19 +648,18 @@ def get_top_channels(limit: int = 5) -> list[tuple[str, str, int]]:
 def get_top_channels_by_subscribers(limit: int = 10) -> list[tuple[str, str, int]]:
     """Возвращает топ каналов по количеству подписчиков."""
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT channel_key, title, subscribers
-            FROM channel_stats
-            WHERE subscribers > 0
-            ORDER BY subscribers DESC
-            LIMIT ?
-        """, (limit,))
-        result = cursor.fetchall()
-        conn.close()
-        logger.debug(f"get_top_channels_by_subscribers: найдено {len(result)} каналов")
-        return result
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT channel_key, title, subscribers
+                FROM channel_stats
+                WHERE subscribers > 0
+                ORDER BY subscribers DESC
+                LIMIT ?
+            """, (limit,))
+            result = cursor.fetchall()
+            logger.debug(f"get_top_channels_by_subscribers: найдено {len(result)} каналов")
+            return result
     except sqlite3.Error as e:
         logger.error(f"Ошибка получения топ каналов по подписчикам: {e}")
         return []
@@ -684,17 +668,16 @@ def get_top_channels_by_subscribers(limit: int = 10) -> list[tuple[str, str, int
 def log_floodwait_event(user_id: int, channel_key: str, reason: str) -> None:
     """Логирует событие, когда пользователь не получил анализ из-за FloodWait/перегрузки."""
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO floodwait_events (user_id, channel_key, reason, created_at)
-            VALUES (?, ?, ?, datetime('now'))
-            """,
-            (user_id, channel_key.lower(), reason),
-        )
-        conn.commit()
-        conn.close()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO floodwait_events (user_id, channel_key, reason, created_at)
+                VALUES (?, ?, ?, datetime('now'))
+                """,
+                (user_id, channel_key.lower(), reason),
+            )
+            conn.commit()
     except sqlite3.Error as e:
         logger.error(f"Ошибка записи floodwait-события: {e}")
 
@@ -710,21 +693,20 @@ def get_floodwait_stats(days: int = 1) -> dict:
         }
     """
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        offset = f"-{int(days)} day"
-        cursor.execute(
-            """
-            SELECT
-                COUNT(*) AS total,
-                COUNT(DISTINCT user_id) AS users
-            FROM floodwait_events
-            WHERE created_at >= datetime('now', ?)
-            """,
-            (offset,),
-        )
-        row = cursor.fetchone()
-        conn.close()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            offset = f"-{int(days)} day"
+            cursor.execute(
+                """
+                SELECT
+                    COUNT(*) AS total,
+                    COUNT(DISTINCT user_id) AS users
+                FROM floodwait_events
+                WHERE created_at >= datetime('now', ?)
+                """,
+                (offset,),
+            )
+            row = cursor.fetchone()
         if not row:
             return {"total": 0, "users": 0}
         total, users = row
@@ -748,17 +730,16 @@ def was_analyzed_recently(channel_key: str, hours: int = 6) -> tuple[bool, str |
         (был_ли_недавно, last_analyzed_timestamp)
     """
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT last_analyzed
-            FROM channel_stats
-            WHERE channel_key = ?
-            AND last_analyzed > datetime('now', ?)
-        """, (channel_key.lower(), f'-{hours} hours'))
-        row = cursor.fetchone()
-        conn.close()
-        
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT last_analyzed
+                FROM channel_stats
+                WHERE channel_key = ?
+                AND last_analyzed > datetime('now', ?)
+            """, (channel_key.lower(), f'-{hours} hours'))
+            row = cursor.fetchone()
+
         if row:
             return True, row[0]
         return False, None
@@ -778,17 +759,16 @@ def get_cached_analysis(channel_key: str) -> dict | None:
         Словарь с данными или None если кэш не найден/истёк.
     """
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
 
-        cursor.execute("""
-            SELECT title, stats_json, top_emojis_json, cached_at
-            FROM channel_cache
-            WHERE channel_key = ?
-        """, (channel_key.lower(),))
+            cursor.execute("""
+                SELECT title, stats_json, top_emojis_json, cached_at
+                FROM channel_cache
+                WHERE channel_key = ?
+            """, (channel_key.lower(),))
 
-        row = cursor.fetchone()
-        conn.close()
+            row = cursor.fetchone()
 
         if not row:
             return None
@@ -832,31 +812,30 @@ def save_analysis_cache(
         top_emojis: Список топ эмодзи.
     """
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
 
-        # Конвертируем stats в dict если это dataclass
-        stats_dict = asdict(stats) if hasattr(stats, '__dataclass_fields__') else stats
+            # Конвертируем stats в dict если это dataclass
+            stats_dict = asdict(stats) if hasattr(stats, '__dataclass_fields__') else stats
 
-        cursor.execute("""
-            INSERT INTO channel_cache (channel_key, title, stats_json, top_emojis_json, cached_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(channel_key) DO UPDATE SET
-                title = excluded.title,
-                stats_json = excluded.stats_json,
-                top_emojis_json = excluded.top_emojis_json,
-                cached_at = excluded.cached_at
-        """, (
-            channel_key.lower(),
-            title,
-            json.dumps(stats_dict, ensure_ascii=False),
-            json.dumps(top_emojis, ensure_ascii=False),
-            datetime.now().isoformat()
-        ))
+            cursor.execute("""
+                INSERT INTO channel_cache (channel_key, title, stats_json, top_emojis_json, cached_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(channel_key) DO UPDATE SET
+                    title = excluded.title,
+                    stats_json = excluded.stats_json,
+                    top_emojis_json = excluded.top_emojis_json,
+                    cached_at = excluded.cached_at
+            """, (
+                channel_key.lower(),
+                title,
+                json.dumps(stats_dict, ensure_ascii=False),
+                json.dumps(top_emojis, ensure_ascii=False),
+                datetime.now().isoformat()
+            ))
 
-        conn.commit()
-        conn.close()
-        logger.info(f"Кэш сохранён для канала: {channel_key}")
+            conn.commit()
+            logger.info(f"Кэш сохранён для канала: {channel_key}")
 
     except sqlite3.Error as e:
         logger.error(f"Ошибка сохранения кэша для {channel_key}: {e}")
@@ -896,6 +875,16 @@ def get_pending_analyses_for_user(user_id: int) -> list[dict]:
     except sqlite3.Error as e:
         logger.error(f"Ошибка получения анализов: {e}")
         return []
+
+
+def update_pending_status(analysis_id: int, status: str) -> None:
+    """Обновляет статус pending анализа."""
+    try:
+        with get_db_connection() as conn:
+            conn.execute("UPDATE pending_analyses SET status = ? WHERE id = ?", (status, analysis_id))
+            conn.commit()
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка обновления статуса анализа {analysis_id}: {e}")
 
 
 def remove_pending_analysis(analysis_id: int) -> None:
@@ -1054,49 +1043,6 @@ def log_payment(user_id: int, stars: int, amount: str = "", payment_method: str 
         logger.error(f"Ошибка логирования платежа: {e}")
 
 
-def get_referral_stats(user_id: int) -> dict:
-    """Получает статистику рефералов пользователя.
-    
-    Returns:
-        dict с ключами: referral_count, referred_usernames
-    """
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            
-            # Количество рефералов
-            cursor.execute("""
-                SELECT referral_count FROM users WHERE user_id = ?
-            """, (user_id,))
-            row = cursor.fetchone()
-            count = row[0] if row and row[0] else 0
-            
-            # Список рефералов (последние 10)
-            cursor.execute("""
-                SELECT user_id, username, first_seen 
-                FROM users 
-                WHERE referred_by = ?
-                ORDER BY first_seen DESC
-                LIMIT 10
-            """, (user_id,))
-            
-            referrals = []
-            for ref_row in cursor.fetchall():
-                referrals.append({
-                    'user_id': ref_row[0],
-                    'username': ref_row[1] or 'unknown',
-                    'joined': ref_row[2]
-                })
-            
-            return {
-                'referral_count': count,
-                'referrals': referrals
-            }
-    except sqlite3.Error as e:
-        logger.error(f"Ошибка получения статистики рефералов: {e}")
-        return {'referral_count': 0, 'referrals': []}
-
-
 def get_all_channels_for_admin() -> list[dict]:
     """
     Получает все каналы из базы для админ-панели.
@@ -1125,3 +1071,26 @@ def get_all_channels_for_admin() -> list[dict]:
     except sqlite3.Error as e:
         logger.error(f"Ошибка получения списка каналов: {e}")
         return []
+
+
+def cleanup_old_records(days: int = 30) -> int:
+    """Удаляет записи floodwait_events старше указанного количества дней.
+
+    Returns:
+        Количество удалённых записей.
+    """
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM floodwait_events WHERE created_at < datetime('now', ?)",
+                (f"-{days} days",),
+            )
+            deleted = cursor.rowcount
+            conn.commit()
+            if deleted > 0:
+                logger.info(f"Очищено {deleted} старых floodwait_events (старше {days} дней)")
+            return deleted
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка очистки старых записей: {e}")
+        return 0

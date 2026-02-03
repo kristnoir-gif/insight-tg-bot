@@ -12,6 +12,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import FSInputFile, InputMediaPhoto
 
 from client_pool import get_client_pool
+from analyzer import analyze_channel_web
 from metrics import record_analysis
 from config import DEFAULT_MESSAGE_LIMIT, FREE_MESSAGE_LIMIT
 from db import (
@@ -35,6 +36,9 @@ from handlers.common import (
     _user_got_floodwait,
     notify_admin_flood,
     notify_admin_error,
+    is_writing_review,
+    set_writing_review,
+    clear_writing_review,
 )
 
 logger = logging.getLogger(__name__)
@@ -157,7 +161,7 @@ async def handle_priority_access_button(message: types.Message) -> None:
         "• Топ-20 эмодзи\n\n"
         "Купите полные анализы:",
         parse_mode="Markdown",
-        reply_markup=_get_buy_keyboard(user.id),
+        reply_markup=_get_buy_keyboard(),
     )
 
 
@@ -173,6 +177,32 @@ async def handle_balance_button(message: types.Message) -> None:
     await cmd_balance(message)
 
 
+@router.message(F.text == "✍️ Написать отзыв")
+async def handle_review_button(message: types.Message) -> None:
+    """Обработчик кнопки «Написать отзыв»."""
+    set_writing_review(message.from_user.id)
+    await message.answer(
+        "✍️ Напишите ваш отзыв или предложение одним сообщением.\n\n"
+        "Мы отправим его разработчику.\n"
+        "Для отмены нажмите /cancel",
+        reply_markup=types.ReplyKeyboardMarkup(
+            keyboard=[[types.KeyboardButton(text="❌ Отмена")]],
+            resize_keyboard=True,
+            one_time_keyboard=True,
+        ),
+    )
+
+
+@router.message(F.text == "❌ Отмена")
+async def handle_cancel_review(message: types.Message) -> None:
+    """Обработчик отмены отзыва."""
+    clear_writing_review(message.from_user.id)
+    await message.answer(
+        "Отменено.",
+        reply_markup=_get_main_keyboard(message.from_user.id),
+    )
+
+
 @router.message(F.text)
 async def handle_msg(message: types.Message) -> None:
     """Обработчик текстовых сообщений с юзернеймом канала."""
@@ -183,6 +213,26 @@ async def handle_msg(message: types.Message) -> None:
         return
 
     user = message.from_user
+
+    # Перехват отзыва
+    if is_writing_review(user.id):
+        clear_writing_review(user.id)
+        from config import ADMIN_ID
+        try:
+            await message.bot.send_message(
+                ADMIN_ID,
+                f"💬 *Новый отзыв*\n\n"
+                f"От: {user.id} (@{user.username or '—'})\n\n"
+                f"{message.text}",
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            logger.warning(f"Failed to forward review to admin: {e}")
+        await message.answer(
+            "✅ Спасибо за отзыв! Мы обязательно прочитаем.",
+            reply_markup=_get_main_keyboard(user.id),
+        )
+        return
 
     # Регистрируем пользователя
     register_user(user.id, user.username)
@@ -242,7 +292,7 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
             f"⏰ Обновление через ~{hours_until_midnight}ч\n\n"
             "💎 Или купи анализы за звёзды для моментального доступа:",
             parse_mode="Markdown",
-            reply_markup=_get_buy_keyboard(user.id),
+            reply_markup=_get_buy_keyboard(),
         )
         return
 
@@ -282,39 +332,39 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
             await message.answer(f"⏳ Подождите {time_str} перед следующим запросом.")
         return
 
-    # PRIORITY QUEUE: Проверка доступности аккаунтов для бесплатных пользователей
-    if is_free_user:
-        pool_status = pool.status()
-        main_account_available = False
-
-        for acc_info in pool_status.get('accounts', []):
-            if acc_info.get('name') == 'main':
-                if acc_info.get('available') and not acc_info.get('busy'):
-                    main_account_available = True
-                break
-
-        if not main_account_available:
-            await message.answer(
-                "⏳ *Бесплатная очередь перегружена*\n\n"
-                "Основной аккаунт временно недоступен из-за ограничений Telegram.\n\n"
-                "🔄 Попробуйте позже или воспользуйтесь платным экспресс-анализом для моментальной обработки через приоритетные аккаунты!",
-                parse_mode="Markdown",
-                reply_markup=_get_buy_keyboard(user.id),
-            )
-            log_floodwait_event(user.id, str(channel), "free_queue_overloaded")
-            return
-
     # Определяем режим анализа: lite для бесплатных, full для платных
     use_lite_mode = is_free_user
     msg_limit = FREE_MESSAGE_LIMIT if use_lite_mode else DEFAULT_MESSAGE_LIMIT
 
-    if use_lite_mode:
-        status_msg = await message.answer("🛸 Создаю облако слов... Подождите")
-    else:
-        status_msg = await message.answer("🛸 Извлекаю смыслы... Полный анализ займёт минуту")
+    # Бесплатные пользователи — веб-парсинг напрямую (освобождаем Telethon для платных)
+    if is_free_user and not is_private:
+        channel_str = str(channel).lstrip('@').split('/')[-1].strip()
 
-    try:
-        # Выполняем анализ через ClientPool
+        # Проверяем что это публичный канал (не инвайт, не ID)
+        if channel_str and not channel_str.startswith('+') and not channel_str.isdigit():
+            status_msg = await message.answer("🛸 Создаю облако слов... Это займёт 10-15 секунд")
+
+            try:
+                result = await analyze_channel_web(channel_str, limit=msg_limit, lite_mode=True)
+                error = None if result and result.cloud_path else "empty_result"
+            except Exception as e:
+                logger.warning(f"Web analysis failed for {channel_str}: {e}")
+                result = None
+                error = str(e)
+        else:
+            # Приватный канал или ID — нужен Telethon
+            status_msg = await message.answer("🛸 Создаю облако слов... Подождите")
+            result, error = await pool.analyze(
+                channel,
+                use_cache=True,
+                user_id=user.id,
+                is_private=is_private,
+                lite_mode=True,
+                message_limit=msg_limit
+            )
+    else:
+        # Платные пользователи — Telethon с приоритетом
+        status_msg = await message.answer("🛸 Извлекаю смыслы... Полный анализ займёт минуту")
         result, error = await pool.analyze(
             channel,
             use_cache=True,
@@ -324,6 +374,7 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
             message_limit=msg_limit
         )
 
+    try:
         if error:
             # Обрабатываем разные типы ошибок
             if error.startswith("web_fallback_failed:"):
@@ -476,6 +527,10 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
             if path and os.path.exists(path):
                 media.append(InputMediaPhoto(media=FSInputFile(path)))
 
+        # Тепловая карта — только для админа (тестовый режим)
+        if is_admin(user.id) and result.heatmap_path and os.path.exists(result.heatmap_path):
+            media.append(InputMediaPhoto(media=FSInputFile(result.heatmap_path)))
+
         if not media:
             await message.answer("Не удалось сформировать изображения для анализа. Попробуйте ещё раз.")
             return
@@ -503,7 +558,7 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
                 "• Топ эмодзи\n\n"
                 "Купите анализы за ⭐ и получите полный отчёт!",
                 parse_mode="HTML",
-                reply_markup=_get_buy_keyboard(user.id),
+                reply_markup=_get_buy_keyboard(),
             )
         else:
             # Отдельное сообщение с эмодзи (только для полного анализа)

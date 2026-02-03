@@ -154,9 +154,9 @@ CACHE_TTL_LITE: Final[int] = 1800               # In-memory кэш lite (30 ми
 CACHE_TTL_FULL: Final[int] = 7200               # In-memory кэш full (2 часа)
 DISK_CACHE_TTL: Final[int] = 43200              # Дисковый кэш (12 часов)
 DISK_CACHE_TTL_LITE: Final[int] = 86400         # Дисковый кэш lite (24 часа)
-FETCH_DELAY_EVERY_N: Final[int] = 30            # Пауза каждые N сообщений
-FETCH_DELAY_SECONDS: Final[float] = 2.0         # Длительность паузы
-PENDING_CHECK_INTERVAL: Final[int] = 120        # Проверка pending каждые 2 мин
+FETCH_DELAY_EVERY_N: Final[int] = 100           # Пауза каждые N сообщений
+FETCH_DELAY_SECONDS: Final[float] = 1.0         # Длительность паузы
+PENDING_CHECK_INTERVAL: Final[int] = 300        # Проверка pending каждые 5 мин
 
 
 # --- Администраторы ---

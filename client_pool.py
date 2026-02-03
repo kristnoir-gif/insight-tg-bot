@@ -147,6 +147,7 @@ class ClientPool:
         self._accounts: list[ClientAccount] = []
         self._cache = AnalysisCache(max_size=cache_max_size, ttl_seconds=cache_ttl)
         self._lock = asyncio.Lock()
+        self._global_semaphore = asyncio.Semaphore(3)  # Макс 3 анализа одновременно (все аккаунты)
 
     def add_account(self, name: str, client: TelegramClient) -> None:
         """Добавляет аккаунт в пул."""
@@ -219,6 +220,14 @@ class ClientPool:
                 cached.from_cache = True
                 return cached, None
 
+            # Кросс-кэш: full результат содержит всё что нужно для lite
+            if lite_mode and not cached:
+                full_cached = self._cache.get(f"{channel}:full")
+                if full_cached:
+                    logger.info(f"Using full cache for lite request: {channel}")
+                    full_cached.from_cache = True
+                    return full_cached, None
+
         # 2. Выбираем аккаунт
         account = self._select_best_account()
 
@@ -227,94 +236,96 @@ class ClientPool:
             min_cooldown = min(acc.cooldown_remaining for acc in self._accounts) if self._accounts else 0
             return None, f"all_cooldown:{min_cooldown}"
 
-        # 3. Пытаемся выполнить анализ с выбранным аккаунтом
-        tried_accounts: set[str] = set()
+        # 3. Пытаемся выполнить анализ (семафор ограничивает макс 2 одновременных анализа)
+        async with self._global_semaphore:
+            tried_accounts: set[str] = set()
 
-        while account and account.name not in tried_accounts:
-            tried_accounts.add(account.name)
+            while account and account.name not in tried_accounts:
+                tried_accounts.add(account.name)
 
-            try:
-                async with account.semaphore:
-                    account.last_used = time.time()
-                    account.total_requests += 1
+                try:
+                    async with account.semaphore:
+                        account.last_used = time.time()
+                        account.total_requests += 1
 
-                    mode_str = "lite" if lite_mode else "full"
-                    logger.info(f"Analyzing {channel} with account {account.name} (user={user_id}, mode={mode_str}, limit={message_limit})")
+                        mode_str = "lite" if lite_mode else "full"
+                        logger.info(f"Analyzing {channel} with account {account.name} (user={user_id}, mode={mode_str}, limit={message_limit})")
 
-                    result = await analyze_channel(
-                        account.client,
-                        channel,
-                        limit=message_limit,
-                        is_private=is_private,
-                        lite_mode=lite_mode
-                    )
+                        result = await analyze_channel(
+                            account.client,
+                            channel,
+                            limit=message_limit,
+                            is_private=is_private,
+                            lite_mode=lite_mode
+                        )
 
-                    if result and result.cloud_path:
-                        # Успех — кэшируем
-                        self._cache.set(cache_key, result)
-                        return result, None
+                        if result and result.cloud_path:
+                            # Успех — кэшируем
+                            self._cache.set(cache_key, result)
+                            account.cooldown_until = time.time() + 5  # Мягкий кулдаун после анализа
+                            return result, None
+                        else:
+                            return None, "empty_result"
+
+                except FloodWaitError as e:
+                    account.failed_requests += 1
+                    account.set_cooldown(int(e.seconds))
+                    logger.warning(f"FloodWait {e.seconds}s on {account.name}, trying next account")
+
+                    # Пробуем следующий аккаунт
+                    account = self._select_best_account()
+                    if account and account.name in tried_accounts:
+                        account = None  # Все аккаунты уже пробовали
+
+                except AnalysisError as e:
+                    account.failed_requests += 1
+                    error_str = str(e).lower()
+
+                    if "flood" in error_str or "wait of" in error_str:
+                        # FloodWait в тексте ошибки
+                        account.set_cooldown(300)  # 5 минут по умолчанию
+                        account = self._select_best_account()
+                        if account and account.name in tried_accounts:
+                            account = None
+                    elif "restricted" in error_str or "api access" in error_str or "bot users" in error_str or "ограничен" in error_str:
+                        # Аккаунт не может анализировать — пробуем следующий
+                        logger.warning(f"Account {account.name} restricted (bot?), trying next account")
+                        account = self._select_best_account()
+                        if account and account.name in tried_accounts:
+                            account = None
+                    elif "не найден" in error_str or "no user has" in error_str:
+                        # Канал не найден через API — попробуем веб-фоллбэк
+                        logger.warning(f"Channel {channel} not found via API on {account.name}, will try web fallback")
+                        break  # Выходим из while — дальше сработает веб-фоллбэк
                     else:
-                        return None, "empty_result"
+                        # Другая ошибка — не пробуем другие аккаунты
+                        return None, str(e)
 
-            except FloodWaitError as e:
-                account.failed_requests += 1
-                account.set_cooldown(int(e.seconds))
-                logger.warning(f"FloodWait {e.seconds}s on {account.name}, trying next account")
-
-                # Пробуем следующий аккаунт
-                account = self._select_best_account()
-                if account and account.name in tried_accounts:
-                    account = None  # Все аккаунты уже пробовали
-
-            except AnalysisError as e:
-                account.failed_requests += 1
-                error_str = str(e).lower()
-
-                if "flood" in error_str or "wait of" in error_str:
-                    # FloodWait в тексте ошибки
-                    account.set_cooldown(300)  # 5 минут по умолчанию
-                    account = self._select_best_account()
-                    if account and account.name in tried_accounts:
-                        account = None
-                elif "restricted" in error_str or "api access" in error_str or "bot users" in error_str or "ограничен" in error_str:
-                    # Аккаунт не может анализировать — пробуем следующий
-                    logger.warning(f"Account {account.name} restricted (bot?), trying next account")
-                    account = self._select_best_account()
-                    if account and account.name in tried_accounts:
-                        account = None
-                elif "не найден" in error_str or "no user has" in error_str:
-                    # Канал не найден через API — попробуем веб-фоллбэк
-                    logger.warning(f"Channel {channel} not found via API on {account.name}, will try web fallback")
-                    break  # Выходим из while — дальше сработает веб-фоллбэк
-                else:
-                    # Другая ошибка — не пробуем другие аккаунты
+                except Exception as e:
+                    account.failed_requests += 1
+                    logger.exception(f"Unexpected error analyzing {channel} with {account.name}")
                     return None, str(e)
 
-            except Exception as e:
-                account.failed_requests += 1
-                logger.exception(f"Unexpected error analyzing {channel} with {account.name}")
-                return None, str(e)
+            # Все аккаунты в cooldown или пробовали — пробуем веб-парсинг
+            if not is_private:
+                channel_str = str(channel).lstrip('@').split('/')[-1].strip()
+                if channel_str and not channel_str.startswith('+') and not channel_str.isdigit():
+                    logger.info(f"All accounts unavailable, trying web fallback for {channel_str}")
+                    try:
+                        result = await analyze_channel_web(channel_str, limit=message_limit, lite_mode=lite_mode)
+                        if result and result.cloud_path:
+                            result.from_cache = False
+                            logger.info(f"Web fallback succeeded for {channel_str}")
+                            return result, None
+                    except Exception as e:
+                        logger.warning(f"Web fallback failed for {channel_str}: {e}")
+                        return None, f"web_fallback_failed:{channel_str}:{str(e)[:100]}"
 
-        # Все аккаунты в cooldown или пробовали — пробуем веб-парсинг
-        if not is_private:
-            channel_str = str(channel).lstrip('@').split('/')[-1].strip()
-            if channel_str and not channel_str.startswith('+') and not channel_str.isdigit():
-                logger.info(f"All accounts unavailable, trying web fallback for {channel_str}")
-                try:
-                    result = await analyze_channel_web(channel_str, limit=message_limit, lite_mode=lite_mode)
-                    if result and result.cloud_path:
-                        result.from_cache = False
-                        logger.info(f"Web fallback succeeded for {channel_str}")
-                        return result, None
-                except Exception as e:
-                    logger.warning(f"Web fallback failed for {channel_str}: {e}")
-                    return None, f"web_fallback_failed:{channel_str}:{str(e)[:100]}"
+            if self._accounts:
+                min_cooldown = min(acc.cooldown_remaining for acc in self._accounts)
+                return None, f"all_cooldown:{min_cooldown}"
 
-        if self._accounts:
-            min_cooldown = min(acc.cooldown_remaining for acc in self._accounts)
-            return None, f"all_cooldown:{min_cooldown}"
-
-        return None, "no_accounts"
+            return None, "no_accounts"
 
     def clear_cooldowns(self) -> None:
         """Сбрасывает cooldown всех аккаунтов."""

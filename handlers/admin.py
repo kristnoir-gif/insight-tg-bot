@@ -38,7 +38,6 @@ from handlers.common import (
     get_bot_instance,
     PRICES_A,
     PRICES_B,
-    PRICES_C,
 )
 
 logger = logging.getLogger(__name__)
@@ -260,23 +259,20 @@ async def cmd_paid_users(message: types.Message) -> None:
     )
 
     if funnel:
-        text += f"\n📊 *Воронка A/B/C теста:*\n"
-        text += f"_A = 10⭐, B = 20⭐, C = 50⭐_\n\n"
-        for group in ['a', 'b', 'c']:
-            prices = {"a": PRICES_A, "b": PRICES_B, "c": PRICES_C}[group]
-            menu = funnel.get(f'open_menu_{group}', {'clicks': 0, 'users': 0})
-            text += f"*Группа {group.upper()}* ({prices['pack_1']}/{prices['pack_3']}/{prices['pack_10']}⭐):\n"
-            text += f"  Открыли меню: {menu['clicks']} ({menu['users']} чел.)\n"
-            for pack in ['pack_1', 'pack_3', 'pack_10']:
-                key = f'{pack}_{group}'
-                if key in funnel:
-                    f = funnel[key]
-                    text += f"  Выбрали {pack}: {f['clicks']} ({f['users']} чел.)\n"
-                paid_key = f'paid_{pack}_{group}'
-                if paid_key in funnel:
-                    pf = funnel[paid_key]
-                    text += f"  ✅ Оплатили {pack}: {pf['clicks']} ({pf['users']} чел.)\n"
-            text += "\n"
+        text += f"\n📊 *Воронка продаж:*\n"
+        text += f"_Цены A: {PRICES_A['pack_1']}/{PRICES_A['pack_3']}/{PRICES_A['pack_10']}⭐_\n"
+        text += f"_Цены B: {PRICES_B['pack_1']}/{PRICES_B['pack_3']}/{PRICES_B['pack_10']}⭐_\n\n"
+        menu = funnel.get('open_menu', {'clicks': 0, 'users': 0})
+        text += f"  Открыли меню: {menu['clicks']} ({menu['users']} чел.)\n"
+        for pack in ['pack_1', 'pack_3', 'pack_10']:
+            if pack in funnel:
+                f = funnel[pack]
+                text += f"  Выбрали {pack}: {f['clicks']} ({f['users']} чел.)\n"
+            paid_key = f'paid_{pack}'
+            if paid_key in funnel:
+                pf = funnel[paid_key]
+                text += f"  ✅ Оплатили {pack}: {pf['clicks']} ({pf['users']} чел.)\n"
+        text += "\n"
 
     if top_users:
         text += f"\n🏆 *Топ-5 платящих:*\n"

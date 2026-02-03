@@ -18,8 +18,8 @@ from db import (
 from handlers.common import (
     _check_access,
     _get_buy_keyboard,
-    get_ab_group,
     get_prices,
+    get_ab_group,
     SUPPORT_PRICE,
 )
 
@@ -36,7 +36,8 @@ async def cmd_buy(message: types.Message) -> None:
 
     user = message.from_user
     register_user(user.id, user.username)
-    log_buy_click(user.id, f"open_menu_{get_ab_group(user.id)}")
+    group = get_ab_group(user.id)
+    log_buy_click(user.id, f"open_menu_{group}")
 
     status = check_user_access(user.id)
 
@@ -80,11 +81,11 @@ async def callback_buy_pack_1(callback: types.CallbackQuery) -> None:
     """Обработчик покупки 1 полного анализа."""
     user = callback.from_user
     group = get_ab_group(user.id)
-    prices = get_prices(user.id)
-    logger.info(f"Пользователь {user.id} (@{user.username}) нажал купить 1 полный анализ [group={group}]")
+    logger.info(f"Пользователь {user.id} (@{user.username}) нажал купить 1 полный анализ (группа {group})")
     log_buy_click(user.id, f"pack_1_{group}")
     await callback.answer()
 
+    prices = get_prices(user.id)
     await callback.message.answer_invoice(
         title="1 полный анализ",
         description="Попробуйте полный анализ канала: тональность, активность, личности, фразы",
@@ -99,11 +100,11 @@ async def callback_buy_pack_3(callback: types.CallbackQuery) -> None:
     """Обработчик покупки пакета 3 полных анализов."""
     user = callback.from_user
     group = get_ab_group(user.id)
-    prices = get_prices(user.id)
-    logger.info(f"Пользователь {user.id} (@{user.username}) нажал купить 3 полных анализа [group={group}]")
+    logger.info(f"Пользователь {user.id} (@{user.username}) нажал купить 3 полных анализа (группа {group})")
     log_buy_click(user.id, f"pack_3_{group}")
     await callback.answer()
 
+    prices = get_prices(user.id)
     await callback.message.answer_invoice(
         title="3 полных анализа",
         description="Полный анализ 3 каналов: тональность, активность, личности, фразы, эмодзи",
@@ -118,11 +119,11 @@ async def callback_buy_pack_10(callback: types.CallbackQuery) -> None:
     """Обработчик покупки пакета 10 полных анализов."""
     user = callback.from_user
     group = get_ab_group(user.id)
-    prices = get_prices(user.id)
-    logger.info(f"Пользователь {user.id} (@{user.username}) нажал купить 10 полных анализов [group={group}]")
+    logger.info(f"Пользователь {user.id} (@{user.username}) нажал купить 10 полных анализов (группа {group})")
     log_buy_click(user.id, f"pack_10_{group}")
     await callback.answer()
 
+    prices = get_prices(user.id)
     await callback.message.answer_invoice(
         title="10 полных анализов",
         description="Полный анализ 10 каналов",
@@ -170,10 +171,11 @@ async def handle_pre_checkout(pre_checkout: PreCheckoutQuery) -> None:
     payload = pre_checkout.invoice_payload
     user_id = pre_checkout.from_user.id
     amount = pre_checkout.total_amount
+    prices = get_prices(user_id)
 
     expected = None
     if payload in ("pack_1", "pack_3", "pack_10"):
-        expected = get_prices(user_id)[payload]
+        expected = prices[payload]
     elif payload == "support":
         expected = SUPPORT_PRICE
     elif payload == "donate":
@@ -193,17 +195,17 @@ async def handle_successful_payment(message: Message) -> None:
     user = message.from_user
     payment = message.successful_payment
     payload = payment.invoice_payload
+    group = get_ab_group(user.id)
 
     # Гарантируем что пользователь есть в БД перед добавлением баланса
     register_user(user.id, user.username)
 
-    group = get_ab_group(user.id)
-    logger.info(f"Успешный платёж от {user.id}: {payload}, {payment.total_amount} Stars [group={group}]")
+    logger.info(f"Успешный платёж от {user.id}: {payload}, {payment.total_amount} Stars (группа {group})")
 
     if payload == "pack_1":
         process_pack_payment(user.id, 1, payment.total_amount, "telegram_stars", f"pack_1_{group}")
         record_payment("pack_1", payment.total_amount)
-        log_buy_click(user.id, f"paid_{payload}_{group}")
+        log_buy_click(user.id, f"paid_pack_1_{group}")
         await message.answer(
             "✅ *Спасибо за покупку!*\n\n"
             "💎 На ваш баланс добавлен *1 полный анализ*.\n\n"
@@ -212,9 +214,9 @@ async def handle_successful_payment(message: Message) -> None:
         )
     elif payload == "pack_3":
         result = process_pack_payment(user.id, 3, payment.total_amount, "telegram_stars", f"pack_3_{group}")
-        logger.info(f"💰 Платеж pack_3: user={user.id}, result={result}")
+        logger.info(f"💰 Платеж pack_3: user={user.id}, result={result} (группа {group})")
         record_payment("pack_3", payment.total_amount)
-        log_buy_click(user.id, f"paid_{payload}_{group}")
+        log_buy_click(user.id, f"paid_pack_3_{group}")
         await message.answer(
             "✅ *Спасибо за покупку!*\n\n"
             "💎 На ваш баланс добавлено *3 полных анализа*.\n\n"
@@ -230,7 +232,7 @@ async def handle_successful_payment(message: Message) -> None:
     elif payload == "pack_10":
         process_pack_payment(user.id, 10, payment.total_amount, "telegram_stars", f"pack_10_{group}")
         record_payment("pack_10", payment.total_amount)
-        log_buy_click(user.id, f"paid_{payload}_{group}")
+        log_buy_click(user.id, f"paid_pack_10_{group}")
         await message.answer(
             "✅ *Спасибо за покупку!*\n\n"
             "💎 На ваш баланс добавлено *10 полных анализов*.\n\n"

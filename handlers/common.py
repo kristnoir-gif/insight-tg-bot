@@ -26,24 +26,20 @@ PRIVATE_MODE = False
 # Белый список пользователей (username без @)
 ALLOWED_USERS = {"ltdnt"}
 
-# Настройки платежей (Telegram Stars) -- A/B/C тест цен
-# Группа A (user_id%3==0) -- базовые цены
-PRICES_A = {'pack_1': 10, 'pack_3': 20, 'pack_10': 50}
-# Группа B (user_id%3==1) -- x2
-PRICES_B = {'pack_1': 20, 'pack_3': 40, 'pack_10': 100}
-# Группа C (user_id%3==2) -- x5
-PRICES_C = {'pack_1': 50, 'pack_3': 100, 'pack_10': 250}
-SUPPORT_PRICE = 100  # Stars поддержка проекта
+# A/B тест цен (Telegram Stars)
+PRICES_A = {'pack_1': 20, 'pack_3': 40, 'pack_10': 100}
+PRICES_B = {'pack_1': 50, 'pack_3': 100, 'pack_10': 250}
+SUPPORT_PRICE = 100  # Поддержка проекта
 
 
 def get_ab_group(user_id: int) -> str:
-    """Возвращает A/B/C группу пользователя."""
-    return ["a", "b", "c"][user_id % 3]
+    """Возвращает A/B группу пользователя."""
+    return "a" if user_id % 2 == 0 else "b"
 
 
 def get_prices(user_id: int) -> dict:
-    """Возвращает цены для пользователя по его A/B/C группе."""
-    return {"a": PRICES_A, "b": PRICES_B, "c": PRICES_C}[get_ab_group(user_id)]
+    """Возвращает цены для пользователя по его A/B группе."""
+    return PRICES_A if user_id % 2 == 0 else PRICES_B
 
 
 # Rate limiting (защита от спама и флудвейта)
@@ -242,7 +238,8 @@ def _get_main_keyboard(user_id: int = 0) -> ReplyKeyboardMarkup:
             KeyboardButton(text="💰 Баланс")
         ],
         [
-            KeyboardButton(text="❓ Помощь")
+            KeyboardButton(text="❓ Помощь"),
+            KeyboardButton(text="✍️ Написать отзыв"),
         ]
     ]
 
@@ -265,40 +262,31 @@ def _get_main_keyboard(user_id: int = 0) -> ReplyKeyboardMarkup:
     )
 
 
-def _get_buy_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    """Создаёт inline-клавиатуру с вариантами покупки (цены зависят от A/B группы)."""
+# Review state — отслеживание пользователей, пишущих отзыв
+_users_writing_review: set[int] = set()
+
+
+def is_writing_review(user_id: int) -> bool:
+    return user_id in _users_writing_review
+
+
+def set_writing_review(user_id: int) -> None:
+    _users_writing_review.add(user_id)
+
+
+def clear_writing_review(user_id: int) -> None:
+    _users_writing_review.discard(user_id)
+
+
+def _get_buy_keyboard(user_id: int = 0) -> InlineKeyboardMarkup:
+    """Создаёт inline-клавиатуру с вариантами покупки."""
     prices = get_prices(user_id)
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=f"✨ 1 полный анализ — {prices['pack_1']} ⭐",
-                    callback_data="buy_pack_1"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"🎯 3 полных анализа — {prices['pack_3']} ⭐",
-                    callback_data="buy_pack_3"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"💎 10 полных анализов — {prices['pack_10']} ⭐",
-                    callback_data="buy_pack_10"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="😍 Мне нравится бот — 1 ⭐",
-                    callback_data="donate"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"❤️ Поддержать проект — {SUPPORT_PRICE} ⭐",
-                    callback_data="support"
-                )
-            ],
+            [InlineKeyboardButton(text=f"✨ 1 полный анализ — {prices['pack_1']} ⭐", callback_data="buy_pack_1")],
+            [InlineKeyboardButton(text=f"🎯 3 полных анализа — {prices['pack_3']} ⭐", callback_data="buy_pack_3")],
+            [InlineKeyboardButton(text=f"💎 10 полных анализов — {prices['pack_10']} ⭐", callback_data="buy_pack_10")],
+            [InlineKeyboardButton(text="😍 Мне нравится бот — 1 ⭐", callback_data="donate")],
+            [InlineKeyboardButton(text=f"❤️ Поддержать проект — {SUPPORT_PRICE} ⭐", callback_data="support")],
         ]
     )

@@ -148,7 +148,7 @@ FREE_MESSAGE_LIMIT: Final[int] = 150     # Облегчённый анализ (
 ADMIN_MESSAGE_LIMIT: Final[int] = 800    # Расширенный анализ (админы)
 
 # --- Тайминги и кэш ---
-RATE_LIMIT_SECONDS: Final[int] = 600            # Между запросами пользователя
+RATE_LIMIT_SECONDS: Final[int] = 120            # Между запросами пользователя (снижено для высокой нагрузки)
 FLOODWAIT_PENALTY_SECONDS: Final[int] = 3600    # После FloodWait для пользователя
 CACHE_TTL_LITE: Final[int] = 1800               # In-memory кэш lite (30 мин)
 CACHE_TTL_FULL: Final[int] = 7200               # In-memory кэш full (2 часа)
@@ -156,7 +156,8 @@ DISK_CACHE_TTL: Final[int] = 43200              # Дисковый кэш (12 ч
 DISK_CACHE_TTL_LITE: Final[int] = 86400         # Дисковый кэш lite (24 часа)
 FETCH_DELAY_EVERY_N: Final[int] = 100           # Пауза каждые N сообщений
 FETCH_DELAY_SECONDS: Final[float] = 1.0         # Длительность паузы
-PENDING_CHECK_INTERVAL: Final[int] = 300        # Проверка pending каждые 5 мин
+PENDING_CHECK_INTERVAL: Final[int] = 30         # Проверка pending каждые 30 сек
+PENDING_BATCH_SIZE: Final[int] = 5             # Количество анализов за раз
 
 
 # --- Администраторы ---

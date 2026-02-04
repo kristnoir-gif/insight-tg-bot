@@ -21,7 +21,10 @@ DB_PATH = Path(__file__).parent / "users.db"
 @contextmanager
 def get_db_connection():
     """Контекстный менеджер для безопасной работы с БД."""
-    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    # WAL mode для высокой нагрузки (+3-5x пропускная способность)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     try:
         yield conn
     finally:
@@ -101,6 +104,7 @@ def init_db() -> None:
             """)
 
             # Таблица незавершённых анализов (для переотправки при ошибках)
+            # priority: 2 = платный, 1 = premium, 0 = бесплатный
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS pending_analyses (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,6 +112,7 @@ def init_db() -> None:
                     channel_key TEXT,
                     channel_username TEXT,
                     status TEXT DEFAULT 'pending',
+                    priority INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(user_id, channel_key)
                 )
@@ -170,6 +175,13 @@ def init_db() -> None:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_payments_user_id ON payments(user_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_payments_created_at ON payments(created_at)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_pending_user_id ON pending_analyses(user_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pending_priority ON pending_analyses(priority DESC, created_at ASC)")
+
+            # Миграция pending_analyses: добавляем колонку priority
+            cursor.execute("PRAGMA table_info(pending_analyses)")
+            pa_columns = [col[1] for col in cursor.fetchall()]
+            if 'priority' not in pa_columns:
+                cursor.execute("ALTER TABLE pending_analyses ADD COLUMN priority INTEGER DEFAULT 0")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_buy_clicks_user_id ON buy_clicks(user_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_buy_clicks_created_at ON buy_clicks(created_at)")
 
@@ -840,20 +852,201 @@ def save_analysis_cache(
     except sqlite3.Error as e:
         logger.error(f"Ошибка сохранения кэша для {channel_key}: {e}")
 
-def add_pending_analysis(user_id: int, channel_key: str, channel_username: str) -> None:
-    """Добавляет незавершённый анализ в очередь."""
+def add_pending_analysis(user_id: int, channel_key: str, channel_username: str, priority: int = 0) -> int:
+    """
+    Добавляет незавершённый анализ в очередь с приоритетом.
+
+    Args:
+        user_id: ID пользователя
+        channel_key: Ключ канала (нормализованный)
+        channel_username: Оригинальный юзернейм канала
+        priority: Приоритет (2 = платный, 1 = premium, 0 = бесплатный)
+
+    Returns:
+        Позиция в очереди (начиная с 1), или 0 при ошибке
+    """
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT OR REPLACE INTO pending_analyses 
-                (user_id, channel_key, channel_username, status, created_at)
-                VALUES (?, ?, ?, 'pending', CURRENT_TIMESTAMP)
-            """, (user_id, channel_key, channel_username))
+                INSERT OR REPLACE INTO pending_analyses
+                (user_id, channel_key, channel_username, status, priority, created_at)
+                VALUES (?, ?, ?, 'pending', ?, CURRENT_TIMESTAMP)
+            """, (user_id, channel_key, channel_username, priority))
             conn.commit()
-            logger.info(f"Добавлен незавершённый анализ: user={user_id}, channel={channel_key}")
+            logger.info(f"Добавлен незавершённый анализ: user={user_id}, channel={channel_key}, priority={priority}")
+
+            # Возвращаем позицию в очереди
+            return get_queue_position(user_id, channel_key)
     except sqlite3.Error as e:
         logger.error(f"Ошибка добавления анализа: {e}")
+        return 0
+
+
+def get_queue_position(user_id: int, channel_key: str) -> int:
+    """
+    Возвращает позицию анализа в очереди.
+    Учитывает приоритеты: платные → premium → бесплатные.
+
+    Returns:
+        Позиция в очереди (1 = первый), или 0 если не найден
+    """
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+
+            # Получаем приоритет и время создания текущего анализа
+            cursor.execute("""
+                SELECT priority, created_at FROM pending_analyses
+                WHERE user_id = ? AND channel_key = ? AND status = 'pending'
+            """, (user_id, channel_key))
+            row = cursor.fetchone()
+
+            if not row:
+                return 0
+
+            my_priority, my_created_at = row
+
+            # Считаем сколько анализов впереди:
+            # 1. Все с более высоким приоритетом
+            # 2. Все с таким же приоритетом, но созданные раньше
+            cursor.execute("""
+                SELECT COUNT(*) FROM pending_analyses
+                WHERE status = 'pending'
+                AND (
+                    priority > ?
+                    OR (priority = ? AND created_at < ?)
+                )
+            """, (my_priority, my_priority, my_created_at))
+
+            ahead = cursor.fetchone()[0]
+            return ahead + 1  # +1 потому что позиция начинается с 1
+
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка получения позиции в очереди: {e}")
+        return 0
+
+
+def get_queue_stats() -> dict:
+    """
+    Возвращает статистику очереди.
+
+    Returns:
+        {
+            "total": общее количество в очереди,
+            "paid": количество платных (priority=2),
+            "premium": количество premium (priority=1),
+            "free": количество бесплатных (priority=0),
+            "processing": количество в обработке
+        }
+    """
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE status = 'pending') as total,
+                    COUNT(*) FILTER (WHERE status = 'pending' AND priority = 2) as paid,
+                    COUNT(*) FILTER (WHERE status = 'pending' AND priority = 1) as premium,
+                    COUNT(*) FILTER (WHERE status = 'pending' AND priority = 0) as free,
+                    COUNT(*) FILTER (WHERE status = 'processing') as processing
+                FROM pending_analyses
+            """)
+            row = cursor.fetchone()
+
+            if row:
+                return {
+                    "total": row[0] or 0,
+                    "paid": row[1] or 0,
+                    "premium": row[2] or 0,
+                    "free": row[3] or 0,
+                    "processing": row[4] or 0
+                }
+            return {"total": 0, "paid": 0, "premium": 0, "free": 0, "processing": 0}
+
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка получения статистики очереди: {e}")
+        return {"total": 0, "paid": 0, "premium": 0, "free": 0, "processing": 0}
+
+
+def get_next_pending_batch(limit: int = 5) -> list[tuple]:
+    """
+    Получает следующую порцию анализов для обработки с учётом приоритетов.
+
+    Порядок: платные (2) → premium (1) → бесплатные (0), затем по времени создания.
+    Берёт только записи старше 30 секунд (чтобы не конфликтовать с текущими запросами).
+
+    Returns:
+        Список кортежей (id, user_id, channel_key, channel_username, priority)
+    """
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, user_id, channel_key, channel_username, priority
+                FROM pending_analyses
+                WHERE status = 'pending'
+                AND created_at < datetime('now', '-30 seconds')
+                ORDER BY priority DESC, created_at ASC
+                LIMIT ?
+            """, (limit,))
+            return cursor.fetchall()
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка получения batch из очереди: {e}")
+        return []
+
+
+def get_user_pending_queue(user_id: int) -> list[dict]:
+    """
+    Получает все анализы пользователя в очереди с их позициями.
+
+    Returns:
+        Список словарей с channel_username и position
+    """
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+
+            # Получаем все pending анализы пользователя
+            cursor.execute("""
+                SELECT channel_key, channel_username, priority, created_at
+                FROM pending_analyses
+                WHERE user_id = ? AND status = 'pending'
+                ORDER BY created_at ASC
+            """, (user_id,))
+
+            user_analyses = cursor.fetchall()
+
+            if not user_analyses:
+                return []
+
+            result = []
+            for channel_key, channel_username, priority, created_at in user_analyses:
+                # Считаем позицию для каждого
+                cursor.execute("""
+                    SELECT COUNT(*) FROM pending_analyses
+                    WHERE status = 'pending'
+                    AND (
+                        priority > ?
+                        OR (priority = ? AND created_at < ?)
+                    )
+                """, (priority, priority, created_at))
+
+                ahead = cursor.fetchone()[0]
+                position = ahead + 1
+
+                result.append({
+                    "channel_username": channel_username,
+                    "position": position,
+                    "priority": priority
+                })
+
+            return result
+
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка получения очереди пользователя: {e}")
+        return []
 
 
 def get_pending_analyses_for_user(user_id: int) -> list[dict]:
@@ -1073,24 +1266,75 @@ def get_all_channels_for_admin() -> list[dict]:
         return []
 
 
-def cleanup_old_records(days: int = 30) -> int:
-    """Удаляет записи floodwait_events старше указанного количества дней.
+async def cleanup_old_records_async(days: int = 30) -> int:
+    """Асинхронно удаляет записи floodwait_events батчами по 1000 для избежания блокировки БД.
 
     Returns:
         Количество удалённых записей.
     """
+    import asyncio
+    total_deleted = 0
+    batch_size = 1000
+
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "DELETE FROM floodwait_events WHERE created_at < datetime('now', ?)",
-                (f"-{days} days",),
-            )
-            deleted = cursor.rowcount
-            conn.commit()
-            if deleted > 0:
-                logger.info(f"Очищено {deleted} старых floodwait_events (старше {days} дней)")
-            return deleted
+        while True:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                # Удаляем батчами по 1000 записей
+                cursor.execute(
+                    f"DELETE FROM floodwait_events WHERE rowid IN "
+                    f"(SELECT rowid FROM floodwait_events WHERE created_at < datetime('now', ?) LIMIT {batch_size})",
+                    (f"-{days} days",),
+                )
+                deleted = cursor.rowcount
+                conn.commit()
+
+            if deleted == 0:
+                break
+
+            total_deleted += deleted
+            # Пауза между батчами для снижения нагрузки на БД
+            await asyncio.sleep(0.1)
+
+        if total_deleted > 0:
+            logger.info(f"Очищено {total_deleted} старых floodwait_events (старше {days} дней)")
+        return total_deleted
     except sqlite3.Error as e:
         logger.error(f"Ошибка очистки старых записей: {e}")
-        return 0
+        return total_deleted
+
+
+def cleanup_old_records(days: int = 30) -> int:
+    """Синхронно удаляет записи floodwait_events батчами по 1000.
+
+    Returns:
+        Количество удалённых записей.
+    """
+    import time
+    total_deleted = 0
+    batch_size = 1000
+
+    try:
+        while True:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    f"DELETE FROM floodwait_events WHERE rowid IN "
+                    f"(SELECT rowid FROM floodwait_events WHERE created_at < datetime('now', ?) LIMIT {batch_size})",
+                    (f"-{days} days",),
+                )
+                deleted = cursor.rowcount
+                conn.commit()
+
+            if deleted == 0:
+                break
+
+            total_deleted += deleted
+            time.sleep(0.1)  # Пауза между батчами
+
+        if total_deleted > 0:
+            logger.info(f"Очищено {total_deleted} старых floodwait_events (старше {days} дней)")
+        return total_deleted
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка очистки старых записей: {e}")
+        return total_deleted

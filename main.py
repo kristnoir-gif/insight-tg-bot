@@ -32,8 +32,8 @@ from config import (
 )
 from handlers import router, set_bot_instance
 from client_pool import get_client_pool, init_client_pool
-from config import ADMIN_ID, ADMIN_IDS, CACHE_TTL_FULL, PENDING_CHECK_INTERVAL, FREE_MESSAGE_LIMIT, DEFAULT_MESSAGE_LIMIT
-from db import init_db, check_user_access, consume_analysis, update_pending_status, remove_pending_analysis, get_db_connection, cleanup_old_records, DB_PATH
+from config import ADMIN_ID, ADMIN_IDS, CACHE_TTL_FULL, PENDING_CHECK_INTERVAL, PENDING_BATCH_SIZE, FREE_MESSAGE_LIMIT, DEFAULT_MESSAGE_LIMIT
+from db import init_db, check_user_access, consume_analysis, update_pending_status, remove_pending_analysis, get_db_connection, cleanup_old_records, DB_PATH, get_next_pending_batch
 from metrics import setup_metrics_endpoint, init_metrics, update_account_metrics, update_cache_metrics
 from utils import format_number, get_bot_stats
 from handlers.common import cleanup_rate_limits
@@ -231,7 +231,15 @@ async def _send_analysis_result(bot: Bot, user_id: int, result, use_lite: bool, 
 
 
 async def auto_process_pending_analyses(bot: Bot, logger: logging.Logger) -> None:
-    """Фоновая задача: автоматически выполняет pending анализы."""
+    """
+    Фоновая задача: автоматически выполняет pending анализы.
+
+    Особенности:
+    - Проверка каждые 30 секунд (настраивается в PENDING_CHECK_INTERVAL)
+    - Обработка до 5 анализов за раз (PENDING_BATCH_SIZE)
+    - Приоритеты: платные (2) → premium (1) → бесплатные (0)
+    - Уведомление пользователя о начале обработки
+    """
     from aiogram.exceptions import TelegramForbiddenError
 
     while True:
@@ -240,79 +248,115 @@ async def auto_process_pending_analyses(bot: Bot, logger: logging.Logger) -> Non
 
             pool = get_client_pool()
             pool_status = pool.status()
-            if pool_status.get('available_accounts', 0) == 0:
+            available = pool_status.get('available_accounts', 0)
+
+            if available == 0:
                 continue  # Нет свободных аккаунтов — ждём
 
-            # Берём pending (старше 2 мин, чтобы не конфликтовать с текущим запросом)
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT id, user_id, channel_key, channel_username
-                    FROM pending_analyses
-                    WHERE status = 'pending'
-                    AND created_at < datetime('now', '-2 minutes')
-                    ORDER BY created_at ASC
-                    LIMIT 3
-                """)
-                pending_list = cursor.fetchall()
+            # Берём pending с учётом приоритетов
+            pending_list = get_next_pending_batch(limit=PENDING_BATCH_SIZE)
 
             if not pending_list:
                 continue
 
-            logger.info(f"🔄 Auto-retry: найдено {len(pending_list)} pending анализов")
+            logger.info(f"🔄 Auto-retry: найдено {len(pending_list)} pending анализов (available accounts: {available})")
 
-            for analysis_id, user_id, channel_key, channel_username in pending_list:
+            # Обрабатываем анализы
+            tasks = []
+            for analysis_id, user_id, channel_key, channel_username, priority in pending_list:
                 # Ставим статус 'processing' чтобы не взять повторно
                 update_pending_status(analysis_id, 'processing')
-
-                try:
-                    # Проверяем доступ пользователя
-                    access = check_user_access(user_id)
-                    if not access.can_analyze:
-                        update_pending_status(analysis_id, 'skipped')
-                        continue
-
-                    # Определяем режим
-                    is_paid = access.paid_balance > 0 or access.is_premium or user_id in ADMIN_IDS
-                    use_lite = not is_paid
-                    msg_limit = FREE_MESSAGE_LIMIT if use_lite else DEFAULT_MESSAGE_LIMIT
-
-                    # Выполняем анализ
-                    result, error = await pool.analyze(
-                        channel_username, use_cache=True,
-                        user_id=user_id, lite_mode=use_lite,
-                        message_limit=msg_limit,
+                tasks.append(
+                    _process_single_pending(
+                        bot, pool, logger,
+                        analysis_id, user_id, channel_key, channel_username, priority
                     )
+                )
 
-                    if error:
-                        if error.startswith("all_cooldown:"):
-                            # Снова cooldown — вернуть в pending
-                            update_pending_status(analysis_id, 'pending')
-                            break  # Не пытаемся остальные
-                        else:
-                            update_pending_status(analysis_id, 'failed')
-                            logger.warning(f"Auto-retry failed: {channel_username}: {error}")
-                            continue
+            # Выполняем параллельно (но не больше чем доступно аккаунтов)
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
 
-                    # Отправляем результат пользователю
-                    await _send_analysis_result(bot, user_id, result, use_lite, channel_username)
-                    consume_analysis(user_id, access.reason)
-                    remove_pending_analysis(analysis_id)
-                    logger.info(f"✅ Auto-retry: {channel_username} → user {user_id}")
-
-                except TelegramForbiddenError:
-                    # Пользователь заблокировал бота
-                    remove_pending_analysis(analysis_id)
-                    logger.info(f"User {user_id} blocked bot, removing pending")
-                except Exception as e:
-                    update_pending_status(analysis_id, 'pending')
-                    logger.error(f"Auto-retry error: {e}")
-
-                await asyncio.sleep(5)  # Пауза между retry
-
+        except asyncio.CancelledError:
+            logger.info("auto_process_pending_analyses cancelled")
+            break
         except Exception as e:
             logger.error(f"auto_process_pending error: {e}")
             await asyncio.sleep(60)
+
+
+async def _process_single_pending(
+    bot: Bot,
+    pool,
+    logger: logging.Logger,
+    analysis_id: int,
+    user_id: int,
+    channel_key: str,
+    channel_username: str,
+    priority: int
+) -> None:
+    """Обрабатывает один pending анализ."""
+    from aiogram.exceptions import TelegramForbiddenError
+
+    try:
+        # Проверяем доступ пользователя
+        access = check_user_access(user_id)
+        if not access.can_analyze:
+            update_pending_status(analysis_id, 'skipped')
+            return
+
+        # Определяем режим
+        is_paid = access.paid_balance > 0 or access.is_premium or user_id in ADMIN_IDS
+        use_lite = not is_paid
+        msg_limit = FREE_MESSAGE_LIMIT if use_lite else DEFAULT_MESSAGE_LIMIT
+
+        # Уведомляем пользователя о начале обработки
+        try:
+            await bot.send_message(
+                user_id,
+                f"🚀 Ваш анализ `{channel_username}` начался!",
+                parse_mode="Markdown"
+            )
+        except TelegramForbiddenError:
+            # Пользователь заблокировал бота
+            remove_pending_analysis(analysis_id)
+            logger.info(f"User {user_id} blocked bot, removing pending")
+            return
+        except Exception as notify_error:
+            logger.warning(f"Failed to notify user {user_id}: {notify_error}")
+
+        # Выполняем анализ
+        result, error = await pool.analyze(
+            channel_username, use_cache=True,
+            user_id=user_id, lite_mode=use_lite,
+            message_limit=msg_limit,
+        )
+
+        if error:
+            if error.startswith("all_cooldown:"):
+                # Снова cooldown — вернуть в pending
+                update_pending_status(analysis_id, 'pending')
+                logger.info(f"Auto-retry: {channel_username} returned to pending (cooldown)")
+            else:
+                update_pending_status(analysis_id, 'failed')
+                logger.warning(f"Auto-retry failed: {channel_username}: {error}")
+            return
+
+        # Отправляем результат пользователю
+        await _send_analysis_result(bot, user_id, result, use_lite, channel_username)
+        consume_analysis(user_id, access.reason)
+        remove_pending_analysis(analysis_id)
+
+        priority_label = {2: "paid", 1: "premium", 0: "free"}.get(priority, "unknown")
+        logger.info(f"✅ Auto-retry: {channel_username} → user {user_id} (priority={priority_label})")
+
+    except TelegramForbiddenError:
+        # Пользователь заблокировал бота
+        remove_pending_analysis(analysis_id)
+        logger.info(f"User {user_id} blocked bot, removing pending")
+    except Exception as e:
+        update_pending_status(analysis_id, 'pending')
+        logger.error(f"Auto-retry error for {channel_username}: {e}")
 
 
 async def main() -> None:
@@ -425,11 +469,38 @@ async def main() -> None:
                 status = pool.status()
                 update_account_metrics(status['accounts'])
                 update_cache_metrics(status['cache'])
-                return web.json_response({
-                    "status": "ok",
+
+                # Проверяем доступность БД
+                db_ok = False
+                try:
+                    with get_db_connection() as conn:
+                        conn.execute("SELECT 1")
+                        db_ok = True
+                except Exception:
+                    pass
+
+                # Проверяем наличие доступных аккаунтов
+                has_accounts = status['available_accounts'] > 0
+
+                # Определяем общий статус
+                if db_ok and has_accounts:
+                    health_status = "ok"
+                elif db_ok:
+                    health_status = "degraded"  # БД работает, но нет аккаунтов
+                else:
+                    health_status = "unhealthy"
+
+                response = {
+                    "status": health_status,
+                    "db": "ok" if db_ok else "error",
                     "accounts": status['available_accounts'],
+                    "total_accounts": status['total_accounts'],
                     "cache": status['cache']['valid']
-                })
+                }
+
+                # Возвращаем 503 если unhealthy
+                status_code = 200 if health_status != "unhealthy" else 503
+                return web.json_response(response, status=status_code)
 
             app.router.add_get('/health', _health)
             setup_metrics_endpoint(app)  # Добавляем /metrics

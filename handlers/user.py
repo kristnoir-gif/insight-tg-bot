@@ -23,6 +23,8 @@ from db import (
     log_channel_analysis,
     log_floodwait_event,
     add_pending_analysis,
+    get_user_pending_queue,
+    get_queue_position,
 )
 from handlers.common import (
     _check_access,
@@ -109,7 +111,8 @@ async def cmd_help(message: types.Message) -> None:
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
         "*Команды:*\n"
         "/buy — купить полные анализы\n"
-        "/balance — ваш баланс",
+        "/balance — ваш баланс\n"
+        "/queue — статус очереди",
         parse_mode="Markdown",
         reply_markup=_get_main_keyboard(message.from_user.id),
     )
@@ -133,6 +136,47 @@ async def cmd_balance(message: types.Message) -> None:
         f"⭐ Premium: {premium_text}\n"
         f"📅 Бесплатно сегодня: {status.daily_used}/{status.daily_limit}\n"
     )
+
+    await message.answer(
+        text,
+        parse_mode="Markdown",
+        reply_markup=_get_main_keyboard(user.id),
+    )
+
+
+@router.message(Command("queue"))
+async def cmd_queue(message: types.Message) -> None:
+    """Показывает анализы пользователя в очереди."""
+    user = message.from_user
+
+    pending = get_user_pending_queue(user.id)
+
+    if not pending:
+        await message.answer(
+            "📭 *Очередь пуста*\n\n"
+            "У вас нет анализов в очереди.\n"
+            "Отправьте юзернейм канала для анализа.",
+            parse_mode="Markdown",
+            reply_markup=_get_main_keyboard(user.id),
+        )
+        return
+
+    text = "📋 *Ваши анализы в очереди:*\n\n"
+
+    for i, item in enumerate(pending, 1):
+        position = item["position"]
+        channel = item["channel_username"]
+        est_time = position * 1.5  # ~1.5 мин на анализ
+
+        priority_icon = ""
+        if item["priority"] == 2:
+            priority_icon = "💎 "
+        elif item["priority"] == 1:
+            priority_icon = "⭐ "
+
+        text += f"{i}. {priority_icon}`{channel}` — #{position} (≈{est_time:.0f} мин)\n"
+
+    text += "\n_Результаты придут автоматически._"
 
     await message.answer(
         text,
@@ -397,7 +441,6 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
 
             elif error.startswith("all_cooldown:"):
                 wait_seconds = int(error.split(":")[1])
-                wait_minutes = max(1, wait_seconds // 60)
 
                 log_floodwait_event(user.id, str(channel), "all_cooldown")
                 record_analysis("floodwait")
@@ -406,15 +449,33 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
                 # Уведомляем админа
                 await notify_admin_flood(wait_seconds, str(channel))
 
+                # Определяем приоритет: 2 = платный, 1 = premium, 0 = бесплатный
+                if access.paid_balance > 0:
+                    priority = 2
+                elif access.is_premium:
+                    priority = 1
+                else:
+                    priority = 0
+
                 channel_key = str(channel).lstrip('@').split('/')[-1].strip().lower()
-                add_pending_analysis(user.id, channel_key, str(channel))
+                position = add_pending_analysis(user.id, channel_key, str(channel), priority)
+
+                # Рассчитываем примерное время ожидания
+                est_time = position * 1.5  # ~1.5 мин на анализ
+
+                priority_text = ""
+                if priority == 2:
+                    priority_text = "💎 Ваш запрос имеет приоритет (платный)\n\n"
+                elif priority == 1:
+                    priority_text = "⭐ Ваш запрос имеет приоритет (Premium)\n\n"
 
                 await message.answer(
-                    f"⏳ *Бот временно перегружен*\n\n"
+                    f"⏳ *Вы #{position} в очереди* (≈{est_time:.0f} мин)\n\n"
+                    f"{priority_text}"
                     f"Telegram ограничил количество запросов.\n\n"
-                    f"✅ *Ваш запрос `{channel}` сохранён и будет выполнен автоматически*\n\n"
-                    f"🕐 Результат придёт в течение ~{wait_minutes} мин.\n"
-                    f"Ожидайте — повторно отправлять не нужно.",
+                    f"✅ *Ваш запрос `{channel}` сохранён*\n\n"
+                    f"Результат придёт автоматически.\n"
+                    f"Проверить статус: /queue",
                     parse_mode="Markdown",
                 )
                 await status_msg.delete()

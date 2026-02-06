@@ -42,6 +42,7 @@ from visualization.charts import (
     generate_hour_chart,
     generate_names_chart,
     generate_phrases_chart,
+    generate_heatmap_chart,
 )
 
 logger = logging.getLogger(__name__)
@@ -89,6 +90,7 @@ class AnalysisResult:
     phrases_path: str | None = None
     register_path: str | None = None
     dichotomy_path: str | None = None
+    heatmap_path: str | None = None
 
     # Данные
     top_emojis: list[tuple[str, int]] = field(default_factory=list)
@@ -100,7 +102,7 @@ class AnalysisResult:
             self.cloud_path, self.graph_path, self.mats_path,
             self.positive_path, self.aggressive_path, self.weekday_path,
             self.hour_path, self.names_path, self.phrases_path,
-            self.register_path, self.dichotomy_path
+            self.register_path, self.dichotomy_path, self.heatmap_path
         ]
         return [p for p in paths if p]
 
@@ -160,7 +162,8 @@ def _load_from_cache(channel_id: str, require_full: bool = False) -> AnalysisRes
         # Копируем изображения из кэша во временные файлы
         for img_name in ["cloud.png", "graph.png", "mats.png", "positive.png",
                          "aggressive.png", "weekday.png", "hour.png",
-                         "names.png", "phrases.png", "register.png", "dichotomy.png"]:
+                         "names.png", "phrases.png", "register.png", "dichotomy.png",
+                         "heatmap.png"]:
             src = os.path.join(cache_path, img_name)
             if os.path.exists(src):
                 dst = f"{channel_id}_{img_name}"
@@ -212,6 +215,7 @@ def _save_to_cache(channel_id: str, result: AnalysisResult, lite_mode: bool = Fa
             "phrases.png": result.phrases_path,
             "register.png": result.register_path,
             "dichotomy.png": result.dichotomy_path,
+            "heatmap.png": result.heatmap_path,
         }
         for cache_name, src_path in path_mapping.items():
             if src_path and os.path.exists(src_path):
@@ -399,7 +403,7 @@ async def analyze_channel_web(
     cloud_path = await _run_sync(generate_main_cloud, channel_id, all_words, title)
     graph_path = await _run_sync(generate_top_words_chart, channel_id, word_counter, title)
 
-    mats_path = pos_path = agg_path = weekday_path = hour_path = None
+    mats_path = pos_path = agg_path = weekday_path = hour_path = heatmap_path = None
     names_path = phrases_path = register_path = dichotomy_path = None
     top_emojis = []
     unique_names_count = total_names_mentions = 0
@@ -413,6 +417,13 @@ async def analyze_channel_web(
         weekday_path = await _run_sync(generate_weekday_chart, channel_id, dict(weekday_counts), title)
         hour_counts = Counter(date.astimezone(MOSCOW_TZ).hour for date, _ in posts)
         hour_path = await _run_sync(generate_hour_chart, channel_id, dict(hour_counts), title)
+
+        # Тепловая карта: день недели × час
+        heatmap_times = [
+            (date.astimezone(MOSCOW_TZ).weekday(), date.astimezone(MOSCOW_TZ).hour)
+            for date, _ in posts
+        ]
+        heatmap_path = await _run_sync(generate_heatmap_chart, channel_id, heatmap_times, title)
 
         names_counter = Counter(names)
         unique_names_count = len(names_counter)
@@ -478,6 +489,7 @@ async def analyze_channel_web(
         weekday_path=weekday_path, hour_path=hour_path,
         names_path=names_path, phrases_path=phrases_path,
         register_path=register_path, dichotomy_path=dichotomy_path,
+        heatmap_path=heatmap_path,
         top_emojis=top_emojis,
     )
 
@@ -669,16 +681,13 @@ async def analyze_channel(
         # Создание визуализаций
         word_counter = Counter(all_words)
 
-        # Основные визуализации (всегда создаются)
-        cloud_path = await _run_sync(generate_main_cloud, channel_id, all_words, title)
-        graph_path = await _run_sync(generate_top_words_chart, channel_id, word_counter, title)
-
         # Инициализация путей для полного анализа
         mats_path = None
         pos_path = None
         agg_path = None
         weekday_path = None
         hour_path = None
+        heatmap_path = None
         names_path = None
         phrases_path = None
         register_path = None
@@ -688,46 +697,36 @@ async def analyze_channel(
         total_names_mentions = 0
 
         if lite_mode:
-            # LITE MODE: только облако + топ слов
+            # LITE MODE: только облако + топ слов (параллельно)
             logger.info(f"Lite-анализ канала {channel_id} (облако + топ-15)")
+            cloud_path, graph_path = await asyncio.gather(
+                _run_sync(generate_main_cloud, channel_id, all_words, title),
+                _run_sync(generate_top_words_chart, channel_id, word_counter, title),
+            )
         else:
             # FULL MODE: все визуализации
-            mats_path = await _run_sync(generate_mats_cloud, channel_id, mat_words, title)
-            pos_path = await _run_sync(generate_sentiment_cloud, channel_id, pos_words, title, 'positive')
-            agg_path = await _run_sync(generate_sentiment_cloud, channel_id, agg_words, title, 'aggressive')
 
-            # Статистика по дням недели (количество постов)
+            # Шаг 1: Вычисляем все данные ПЕРЕД генерацией графиков
             weekday_counts = Counter(date.astimezone(MOSCOW_TZ).weekday() for date, _ in posts)
-            weekday_path = await _run_sync(generate_weekday_chart, channel_id, dict(weekday_counts), title)
-
-            # Статистика по часам
             hour_counts = Counter((date.astimezone(MOSCOW_TZ)).hour for date, _ in posts)
-            hour_path = await _run_sync(generate_hour_chart, channel_id, dict(hour_counts), title)
+            heatmap_times = [
+                (date.astimezone(MOSCOW_TZ).weekday(), date.astimezone(MOSCOW_TZ).hour)
+                for date, _ in posts
+            ]
 
-            # Имена и личности
             names_counter = Counter(names)
             unique_names_count = len(names_counter)
             total_names_mentions = len(names)
             top_names = names_counter.most_common(100)
-            names_path = await _run_sync(
-                generate_names_chart,
-                channel_id, top_names, title,
-                total_unique_names=unique_names_count,
-                total_mentions=total_names_mentions
-            )
 
-            # Фразы (триграммы) с фильтрацией
             all_texts = [text for _, text in posts]
             top_phrases = extract_phrases(all_texts, n=3)[:10]
-            phrases_path = await _run_sync(generate_phrases_chart, channel_id, top_phrases, title)
 
             # Облако регистра (CAPS vs lowercase)
             caps_words: list[str] = []
             lower_words: list[str] = []
             total_register_words = 0
-
             for _, text in posts:
-                # Извлекаем только кириллические слова 3+ букв
                 words = re.findall(r'[а-яА-ЯёЁ]{3,}', text)
                 for word in words:
                     total_register_words += 1
@@ -735,31 +734,39 @@ async def analyze_channel(
                         caps_words.append(word)
                     elif word.islower():
                         lower_words.append(word)
-
-            # Считаем проценты
             caps_percent = (len(caps_words) / total_register_words * 100) if total_register_words > 0 else 0
             lower_percent = (len(lower_words) / total_register_words * 100) if total_register_words > 0 else 0
-
-            # Генерируем облако регистра
-            register_path = await _run_sync(
-                generate_register_cloud,
-                channel_id, caps_words, lower_words, title,
-                caps_percent, lower_percent
-            )
 
             # Дихотомия языка (метафизика vs быт)
             dichotomy_total = len(metaphysics_words) + len(everyday_words)
             meta_percent = (len(metaphysics_words) / dichotomy_total * 100) if dichotomy_total > 0 else 0
             everyday_percent = (len(everyday_words) / dichotomy_total * 100) if dichotomy_total > 0 else 0
-            dichotomy_path = await _run_sync(
-                generate_dichotomy_cloud,
-                channel_id, metaphysics_words, everyday_words, title,
-                meta_percent, everyday_percent
-            )
 
             # Эмодзи
             emoji_freq = Counter(all_emojis)
             top_emojis = emoji_freq.most_common(20)
+
+            # Шаг 2: Запускаем все 12 графиков параллельно
+            results = await asyncio.gather(
+                _run_sync(generate_main_cloud, channel_id, all_words, title),
+                _run_sync(generate_top_words_chart, channel_id, word_counter, title),
+                _run_sync(generate_mats_cloud, channel_id, mat_words, title),
+                _run_sync(generate_sentiment_cloud, channel_id, pos_words, title, 'positive'),
+                _run_sync(generate_sentiment_cloud, channel_id, agg_words, title, 'aggressive'),
+                _run_sync(generate_weekday_chart, channel_id, dict(weekday_counts), title),
+                _run_sync(generate_hour_chart, channel_id, dict(hour_counts), title),
+                _run_sync(generate_heatmap_chart, channel_id, heatmap_times, title),
+                _run_sync(generate_names_chart, channel_id, top_names, title,
+                          total_unique_names=unique_names_count, total_mentions=total_names_mentions),
+                _run_sync(generate_phrases_chart, channel_id, top_phrases, title),
+                _run_sync(generate_register_cloud, channel_id, caps_words, lower_words, title,
+                          caps_percent, lower_percent),
+                _run_sync(generate_dichotomy_cloud, channel_id, metaphysics_words, everyday_words, title,
+                          meta_percent, everyday_percent),
+            )
+            (cloud_path, graph_path, mats_path, pos_path, agg_path,
+             weekday_path, hour_path, heatmap_path, names_path,
+             phrases_path, register_path, dichotomy_path) = results
 
         # Расчёт статистики
         avg_upper = np.mean(upper_ratios) if upper_ratios else 0
@@ -794,6 +801,7 @@ async def analyze_channel(
             phrases_path=phrases_path,
             register_path=register_path,
             dichotomy_path=dichotomy_path,
+            heatmap_path=heatmap_path,
             top_emojis=top_emojis,
         )
 

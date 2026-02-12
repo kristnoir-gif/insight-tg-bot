@@ -10,7 +10,7 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 from dataclasses import dataclass, asdict
 
-from config import ADMIN_ID, ADMIN_IDS
+from config import ADMIN_ID, ADMIN_IDS, STATS_OFFSET_USERS, STATS_OFFSET_ANALYSES, STATS_OFFSET_STARS
 
 logger = logging.getLogger(__name__)
 
@@ -175,13 +175,14 @@ def init_db() -> None:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_payments_user_id ON payments(user_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_payments_created_at ON payments(created_at)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_pending_user_id ON pending_analyses(user_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pending_priority ON pending_analyses(priority DESC, created_at ASC)")
 
-            # Миграция pending_analyses: добавляем колонку priority
+            # Миграция pending_analyses: добавляем колонку priority (до создания индекса!)
             cursor.execute("PRAGMA table_info(pending_analyses)")
             pa_columns = [col[1] for col in cursor.fetchall()]
             if 'priority' not in pa_columns:
                 cursor.execute("ALTER TABLE pending_analyses ADD COLUMN priority INTEGER DEFAULT 0")
+
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pending_priority ON pending_analyses(priority DESC, created_at ASC)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_buy_clicks_user_id ON buy_clicks(user_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_buy_clicks_created_at ON buy_clicks(created_at)")
 
@@ -543,8 +544,8 @@ def get_stats() -> dict:
             top_users = cursor.fetchall()
 
         return {
-            "total_users": total_users,
-            "total_requests": total_requests,
+            "total_users": total_users + STATS_OFFSET_USERS,
+            "total_requests": total_requests + STATS_OFFSET_ANALYSES,
             "total_channels": total_channels,
             "active_users": active_users,
             "premium_users": premium_users,
@@ -1148,7 +1149,7 @@ def get_payment_stats() -> dict:
             return {
                 'unique_users': stats[0] or 0,
                 'total_payments': stats[1] or 0,
-                'total_stars': stats[2] or 0,
+                'total_stars': (stats[2] or 0) + STATS_OFFSET_STARS,
                 'avg_stars': round(stats[3] or 0, 1)
             }
     except sqlite3.Error as e:

@@ -143,11 +143,11 @@ class ClientPool:
     - Автоматический переход на следующий аккаунт при FloodWait
     """
 
-    def __init__(self, cache_ttl: int = CACHE_TTL_FULL, cache_max_size: int = 200):  # 2 часа TTL, 200 записей
+    def __init__(self, cache_ttl: int = CACHE_TTL_FULL, cache_max_size: int = 1000):  # 2 часа TTL, 1000 записей
         self._accounts: list[ClientAccount] = []
         self._cache = AnalysisCache(max_size=cache_max_size, ttl_seconds=cache_ttl)
         self._lock = asyncio.Lock()
-        self._global_semaphore = asyncio.Semaphore(3)  # Макс 3 анализа одновременно (все аккаунты)
+        self._global_semaphore = asyncio.Semaphore(20)  # Макс 20 анализов одновременно (для высокой нагрузки)
 
     def add_account(self, name: str, client: TelegramClient) -> None:
         """Добавляет аккаунт в пул."""
@@ -244,28 +244,30 @@ class ClientPool:
                 tried_accounts.add(account.name)
 
                 try:
-                    async with account.semaphore:
-                        account.last_used = time.time()
-                        account.total_requests += 1
+                    # Timeout для защиты от зависаний (3 минуты максимум)
+                    async with asyncio.timeout(180):
+                        async with account.semaphore:
+                            account.last_used = time.time()
+                            account.total_requests += 1
 
-                        mode_str = "lite" if lite_mode else "full"
-                        logger.info(f"Analyzing {channel} with account {account.name} (user={user_id}, mode={mode_str}, limit={message_limit})")
+                            mode_str = "lite" if lite_mode else "full"
+                            logger.info(f"Analyzing {channel} with account {account.name} (user={user_id}, mode={mode_str}, limit={message_limit})")
 
-                        result = await analyze_channel(
-                            account.client,
-                            channel,
-                            limit=message_limit,
-                            is_private=is_private,
-                            lite_mode=lite_mode
-                        )
+                            result = await analyze_channel(
+                                account.client,
+                                channel,
+                                limit=message_limit,
+                                is_private=is_private,
+                                lite_mode=lite_mode
+                            )
 
-                        if result and result.cloud_path:
-                            # Успех — кэшируем
-                            self._cache.set(cache_key, result)
-                            account.cooldown_until = time.time() + 5  # Мягкий кулдаун после анализа
-                            return result, None
-                        else:
-                            return None, "empty_result"
+                            if result and result.cloud_path:
+                                # Успех — кэшируем
+                                self._cache.set(cache_key, result)
+                                account.cooldown_until = time.time() + 5  # Мягкий кулдаун после анализа
+                                return result, None
+                            else:
+                                return None, "empty_result"
 
                 except FloodWaitError as e:
                     account.failed_requests += 1
@@ -300,6 +302,11 @@ class ClientPool:
                     else:
                         # Другая ошибка — не пробуем другие аккаунты
                         return None, str(e)
+
+                except TimeoutError:
+                    account.failed_requests += 1
+                    logger.warning(f"Timeout (180s) analyzing {channel} with {account.name}")
+                    return None, "timeout"
 
                 except Exception as e:
                     account.failed_requests += 1

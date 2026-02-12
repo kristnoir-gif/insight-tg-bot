@@ -4,7 +4,8 @@
 import asyncio
 import logging
 import time
-from collections import defaultdict
+
+from cachetools import TTLCache
 
 from aiogram import Bot, types
 from aiogram.exceptions import TelegramAPIError
@@ -43,9 +44,10 @@ def get_prices(user_id: int) -> dict:
 
 
 # Rate limiting (защита от спама и флудвейта)
+# TTLCache для автоматической очистки и ограничения памяти
 _rate_limit_lock = asyncio.Lock()
-_user_last_request: dict[int, float] = defaultdict(float)
-_user_got_floodwait: dict[int, float] = {}  # Когда пользователь получил FloodWait
+_user_last_request: TTLCache = TTLCache(maxsize=50000, ttl=3600)  # 1 час TTL
+_user_got_floodwait: TTLCache = TTLCache(maxsize=10000, ttl=7200)  # 2 часа TTL
 
 _bot_instance: Bot | None = None  # Для отправки уведомлений
 
@@ -117,6 +119,17 @@ async def notify_admin_error(error_type: str, details: str) -> None:
             logger.error(f"Не удалось уведомить админа: {e}")
 
 
+async def notify_admin_payment(pack: str, stars: int, group: str = "") -> None:
+    """Уведомляет админа о новой оплате."""
+    from config import ADMIN_ID
+    if _bot_instance:
+        try:
+            group_suffix = f" ({group})" if group else ""
+            await _bot_instance.send_message(ADMIN_ID, f"💰 {pack}: {stars}⭐{group_suffix}")
+        except TelegramAPIError as e:
+            logger.error(f"Не удалось уведомить админа о платеже: {e}")
+
+
 def _check_rate_limit(user_id: int) -> tuple[bool, int]:
     """
     Проверяет rate limit для пользователя.
@@ -130,17 +143,15 @@ def _check_rate_limit(user_id: int) -> tuple[bool, int]:
     now = time.time()
 
     # Если пользователь недавно получил FloodWait -- увеличенный лимит
-    if user_id in _user_got_floodwait:
-        floodwait_time = _user_got_floodwait[user_id]
+    floodwait_time = _user_got_floodwait.get(user_id)
+    if floodwait_time is not None:
         elapsed_since_fw = now - floodwait_time
         if elapsed_since_fw < FLOODWAIT_PENALTY_SECONDS:
             remaining = int(FLOODWAIT_PENALTY_SECONDS - elapsed_since_fw)
             return False, remaining
-        else:
-            # Очищаем запись
-            del _user_got_floodwait[user_id]
+        # TTLCache автоматически очистит запись по TTL
 
-    last_request = _user_last_request[user_id]
+    last_request = _user_last_request.get(user_id, 0.0)
     elapsed = now - last_request
 
     if elapsed < RATE_LIMIT_SECONDS:
@@ -176,29 +187,23 @@ async def check_and_update_rate_limit(user_id: int) -> tuple[bool, int]:
 def cleanup_rate_limits() -> int:
     """Удаляет устаревшие записи из словарей рейт-лимитов.
 
+    TTLCache автоматически удаляет истёкшие записи, но вызов expire()
+    принудительно очищает их для освобождения памяти.
+
     Returns:
-        Количество удалённых записей.
+        Количество удалённых записей (приблизительно).
     """
-    now = time.time()
-    removed = 0
+    # TTLCache.expire() удаляет все истёкшие записи
+    before_request = len(_user_last_request)
+    before_floodwait = len(_user_got_floodwait)
 
-    expired_keys = [
-        uid for uid, ts in _user_last_request.items()
-        if now - ts > RATE_LIMIT_SECONDS
-    ]
-    for uid in expired_keys:
-        del _user_last_request[uid]
-        removed += 1
+    _user_last_request.expire()
+    _user_got_floodwait.expire()
 
-    expired_fw = [
-        uid for uid, ts in _user_got_floodwait.items()
-        if now - ts > FLOODWAIT_PENALTY_SECONDS
-    ]
-    for uid in expired_fw:
-        del _user_got_floodwait[uid]
-        removed += 1
+    after_request = len(_user_last_request)
+    after_floodwait = len(_user_got_floodwait)
 
-    return removed
+    return (before_request - after_request) + (before_floodwait - after_floodwait)
 
 
 async def _check_access(message: types.Message) -> bool:

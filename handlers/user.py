@@ -110,6 +110,7 @@ async def cmd_help(message: types.Message) -> None:
         "🔮 Дихотомия языка — метафизика vs быт\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
         "*Команды:*\n"
+        "/compare @ch1 @ch2 — сравнить два канала\n"
         "/buy — купить полные анализы\n"
         "/balance — ваш баланс\n"
         "/queue — статус очереди",
@@ -183,6 +184,211 @@ async def cmd_queue(message: types.Message) -> None:
         parse_mode="Markdown",
         reply_markup=_get_main_keyboard(user.id),
     )
+
+
+@router.message(Command("compare"))
+async def cmd_compare(message: types.Message) -> None:
+    """Сравнивает два канала."""
+    import asyncio
+    import os
+    from aiogram.types import FSInputFile
+    from visualization.charts import generate_comparison_chart
+
+    if not await _check_access(message):
+        return
+
+    user = message.from_user
+    register_user(user.id, user.username)
+
+    # Парсим аргументы: /compare @ch1 @ch2 или /compare ch1 ch2 или t.me/ch1 t.me/ch2
+    text = message.text or ""
+    parts = text.split()[1:]  # Убираем /compare
+
+    if len(parts) < 2:
+        await message.answer(
+            "❌ *Укажите два канала для сравнения*\n\n"
+            "Примеры:\n"
+            "`/compare @durov @telegram`\n"
+            "`/compare durov telegram`\n"
+            "`/compare t.me/durov t.me/telegram`",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Извлекаем usernames
+    def extract_username(s: str) -> str:
+        s = s.strip().lstrip('@')
+        if 't.me/' in s:
+            s = s.split('t.me/')[-1]
+        return s.split('?')[0].strip()
+
+    channel1 = extract_username(parts[0])
+    channel2 = extract_username(parts[1])
+
+    if not channel1 or not channel2:
+        await message.answer(
+            "❌ Не удалось распознать каналы. Проверьте формат.",
+            parse_mode="Markdown",
+        )
+        return
+
+    if channel1.lower() == channel2.lower():
+        await message.answer("❌ Укажите два разных канала для сравнения.")
+        return
+
+    # Проверяем доступ
+    access = check_user_access(user.id)
+    if not access.can_analyze:
+        from datetime import datetime
+        now = datetime.now()
+        hours_until_midnight = 24 - now.hour - (1 if now.minute > 0 else 0)
+        await message.answer(
+            "❌ *Дневной лимит исчерпан*\n\n"
+            f"Бесплатно: {access.daily_used}/{access.daily_limit} анализов в день\n"
+            f"⏰ Обновление через ~{hours_until_midnight}ч\n\n"
+            "💎 Или купи анализы за звёзды для моментального доступа:",
+            parse_mode="Markdown",
+            reply_markup=_get_buy_keyboard(),
+        )
+        return
+
+    # Проверяем rate limit (считается как 1 анализ)
+    can_proceed, wait_seconds = await check_and_update_rate_limit(user.id)
+    if not can_proceed:
+        wait_minutes = wait_seconds // 60
+        wait_sec_remainder = wait_seconds % 60
+        if wait_minutes > 0:
+            time_str = f"{wait_minutes} мин {wait_sec_remainder} сек"
+        else:
+            time_str = f"{wait_seconds} сек"
+        await message.answer(f"⏳ Подождите {time_str} перед следующим запросом.")
+        return
+
+    status_msg = await message.answer("⏳ Анализирую каналы... Это займёт 20-30 секунд")
+
+    try:
+        # Параллельный веб-анализ обоих каналов (lite mode)
+        result1, result2 = await asyncio.gather(
+            analyze_channel_web(channel1, limit=FREE_MESSAGE_LIMIT, lite_mode=True),
+            analyze_channel_web(channel2, limit=FREE_MESSAGE_LIMIT, lite_mode=True),
+            return_exceptions=True,
+        )
+
+        # Проверяем ошибки
+        if isinstance(result1, Exception) or result1 is None:
+            await status_msg.delete()
+            await message.answer(f"❌ Не удалось получить данные канала `{channel1}`", parse_mode="Markdown")
+            return
+
+        if isinstance(result2, Exception) or result2 is None:
+            await status_msg.delete()
+            await message.answer(f"❌ Не удалось получить данные канала `{channel2}`", parse_mode="Markdown")
+            return
+
+        # Собираем статистики для радара
+        stats1 = {
+            'scream': result1.stats.scream_index,
+            'vocab': result1.stats.unique_count,
+            'length': result1.stats.avg_len,
+            'reposts': result1.stats.repost_percent,
+        }
+        stats2 = {
+            'scream': result2.stats.scream_index,
+            'vocab': result2.stats.unique_count,
+            'length': result2.stats.avg_len,
+            'reposts': result2.stats.repost_percent,
+        }
+
+        # Генерируем радарную диаграмму
+        chart_path = generate_comparison_chart(
+            result1.title, result2.title, stats1, stats2
+        )
+
+        # Формируем текстовую таблицу
+        def fmt_num(n):
+            if isinstance(n, float):
+                return f"{n:.1f}"
+            return f"{n:,}".replace(',', ' ')
+
+        # Определяем победителей
+        winners = []
+        if stats1['scream'] > stats2['scream']:
+            winners.append(f"🎭 Эмоциональнее: @{channel1}")
+        elif stats2['scream'] > stats1['scream']:
+            winners.append(f"🎭 Эмоциональнее: @{channel2}")
+
+        if stats1['vocab'] > stats2['vocab']:
+            winners.append(f"📚 Богаче словарь: @{channel1}")
+        elif stats2['vocab'] > stats1['vocab']:
+            winners.append(f"📚 Богаче словарь: @{channel2}")
+
+        if stats1['length'] > stats2['length']:
+            winners.append(f"📏 Длиннее посты: @{channel1}")
+        elif stats2['length'] > stats1['length']:
+            winners.append(f"📏 Длиннее посты: @{channel2}")
+
+        winners_text = "\n".join(winners) if winners else "🤝 Каналы примерно равны"
+
+        # Формируем caption
+        safe_title1 = html.escape(result1.title)
+        safe_title2 = html.escape(result2.title)
+
+        caption = (
+            f"📊 <b>Сравнение: {safe_title1} vs {safe_title2}</b>\n\n"
+            f"┌─────────────────┬──────────┬──────────┐\n"
+            f"│ <b>Метрика</b>         │ <b>Ch1</b>      │ <b>Ch2</b>      │\n"
+            f"├─────────────────┼──────────┼──────────┤\n"
+            f"│ Scream Index    │ {fmt_num(stats1['scream']):>8} │ {fmt_num(stats2['scream']):>8} │\n"
+            f"│ Словарный запас │ {fmt_num(stats1['vocab']):>8} │ {fmt_num(stats2['vocab']):>8} │\n"
+            f"│ Длина постов    │ {fmt_num(stats1['length']):>8} │ {fmt_num(stats2['length']):>8} │\n"
+            f"│ Репосты %       │ {fmt_num(stats1['reposts']):>8} │ {fmt_num(stats2['reposts']):>8} │\n"
+            f"└─────────────────┴──────────┴──────────┘\n\n"
+            f"{winners_text}"
+        )
+
+        # Отправляем результат
+        if chart_path and os.path.exists(chart_path):
+            await message.answer_photo(
+                photo=FSInputFile(chart_path),
+                caption=caption,
+                parse_mode="HTML",
+            )
+            # Удаляем временный файл
+            try:
+                os.remove(chart_path)
+            except OSError:
+                pass
+        else:
+            # Если график не сгенерирован, отправляем только текст
+            await message.answer(caption, parse_mode="HTML")
+
+        # Списываем 1 анализ
+        consume_analysis(user.id, access.reason)
+
+        # Удаляем временные файлы от анализов
+        for result in [result1, result2]:
+            for path in result.get_all_paths():
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except OSError:
+                    pass
+
+        logger.info(f"Сравнение каналов {channel1} vs {channel2} для user {user.id}")
+        record_analysis("success")
+
+    except Exception as e:
+        logger.exception(f"Ошибка сравнения каналов {channel1} vs {channel2}")
+        await notify_admin_error(
+            "Ошибка сравнения каналов",
+            f"Каналы: `{channel1}` vs `{channel2}`\n👤 User: {user.id}\n💥 {type(e).__name__}: {str(e)[:200]}"
+        )
+        await message.answer("❌ Произошла ошибка при сравнении. Попробуйте позже.")
+    finally:
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
 
 
 @router.message(F.text == "⚡ Полный анализ")

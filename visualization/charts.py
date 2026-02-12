@@ -418,3 +418,159 @@ def generate_phrases_chart(
     except Exception as e:
         logger.error(f"Ошибка создания графика фраз: {e}")
         return None
+
+
+def generate_heatmap_chart(
+    username: str,
+    posts_times: list[tuple[int, int]],
+    title: str
+) -> str | None:
+    """
+    Генерирует тепловую карту активности (день недели × час).
+
+    Args:
+        username: Имя пользователя/канала.
+        posts_times: Список пар (weekday, hour).
+        title: Название канала.
+
+    Returns:
+        Путь к файлу или None.
+    """
+    try:
+        if not posts_times:
+            return None
+
+        # Строим матрицу 7×24
+        matrix = np.zeros((7, 24), dtype=int)
+        for weekday, hour in posts_times:
+            matrix[weekday][hour] += 1
+
+        path = f"heatmap_{username}.png"
+        fig, ax = plt.subplots(figsize=(14, 5), facecolor=BACKGROUND_COLOR)
+        ax.set_facecolor(BACKGROUND_COLOR)
+
+        im = ax.imshow(matrix, cmap='YlOrRd', aspect='auto', interpolation='nearest')
+
+        # Оси
+        days = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
+        hours = [f"{h:02d}" for h in range(24)]
+        ax.set_xticks(range(24))
+        ax.set_xticklabels(hours, fontsize=9)
+        ax.set_yticks(range(7))
+        ax.set_yticklabels(days, fontsize=11)
+
+        # Аннотации (только если значение > 0)
+        for i in range(7):
+            for j in range(24):
+                val = matrix[i][j]
+                if val > 0:
+                    color = 'white' if val > matrix.max() * 0.6 else '#2d3436'
+                    ax.text(j, i, str(val), ha='center', va='center',
+                            fontsize=8, fontweight='bold', color=color)
+
+        clean_title = _clean_title(title)
+        fig.suptitle(
+            f"Тепловая карта активности • {clean_title}",
+            fontsize=18, fontweight='bold', color='#2d3436', y=0.98
+        )
+
+        fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
+        _add_watermark(fig, y=0.02)
+
+        plt.tight_layout(rect=[0.02, 0.08, 0.95, 0.92])
+        plt.savefig(path, dpi=DPI, bbox_inches='tight', facecolor=fig.get_facecolor())
+        plt.close(fig)
+
+        logger.info(f"Создана тепловая карта: {path}")
+        return path
+
+    except Exception as e:
+        logger.error(f"Ошибка создания тепловой карты: {e}")
+        return None
+
+
+def generate_comparison_chart(
+    channel1_name: str,
+    channel2_name: str,
+    stats1: dict,
+    stats2: dict,
+) -> str | None:
+    """
+    Генерирует радарную диаграмму сравнения двух каналов.
+
+    Args:
+        channel1_name: Название первого канала.
+        channel2_name: Название второго канала.
+        stats1: Словарь метрик первого канала {scream, vocab, length, reposts}.
+        stats2: Словарь метрик второго канала.
+
+    Returns:
+        Путь к файлу или None.
+    """
+    try:
+        # Категории для радара
+        categories = ['Scream Index', 'Словарный запас', 'Длина постов', 'Репосты']
+        n_cats = len(categories)
+
+        # Извлекаем значения
+        raw1 = [stats1['scream'], stats1['vocab'], stats1['length'], stats1['reposts']]
+        raw2 = [stats2['scream'], stats2['vocab'], stats2['length'], stats2['reposts']]
+
+        # Нормализация к 0-100 для сравнимости
+        normalized1 = []
+        normalized2 = []
+        for v1, v2 in zip(raw1, raw2):
+            max_val = max(v1, v2, 1)  # Избегаем деления на 0
+            normalized1.append(v1 / max_val * 100)
+            normalized2.append(v2 / max_val * 100)
+
+        # Углы для радара
+        angles = np.linspace(0, 2 * np.pi, n_cats, endpoint=False).tolist()
+        # Замыкаем контур
+        normalized1 += [normalized1[0]]
+        normalized2 += [normalized2[0]]
+        angles += [angles[0]]
+
+        path = "comparison_chart.png"
+        fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(polar=True), facecolor=BACKGROUND_COLOR)
+        ax.set_facecolor(BACKGROUND_COLOR)
+
+        # Рисуем области
+        ax.fill(angles, normalized1, color='#3b82f6', alpha=0.25, label=_clean_title(channel1_name, 20))
+        ax.plot(angles, normalized1, color='#3b82f6', linewidth=2)
+
+        ax.fill(angles, normalized2, color='#ef4444', alpha=0.25, label=_clean_title(channel2_name, 20))
+        ax.plot(angles, normalized2, color='#ef4444', linewidth=2)
+
+        # Настройка осей
+        ax.set_xticks(angles[:-1])
+        ax.set_xticklabels(categories, fontsize=12, fontweight='bold', color='#2d3436')
+
+        # Радиальные метки
+        ax.set_ylim(0, 110)
+        ax.set_yticks([25, 50, 75, 100])
+        ax.set_yticklabels(['25%', '50%', '75%', '100%'], fontsize=9, color='#636e72')
+
+        # Заголовок
+        clean1 = _clean_title(channel1_name, 15)
+        clean2 = _clean_title(channel2_name, 15)
+        fig.suptitle(
+            f"Сравнение: {clean1} vs {clean2}",
+            fontsize=18, fontweight='bold', color='#2d3436', y=0.98
+        )
+
+        # Легенда
+        ax.legend(loc='upper right', bbox_to_anchor=(1.15, 1.1), fontsize=11)
+
+        _add_watermark(fig, y=0.02)
+
+        plt.tight_layout(rect=[0.02, 0.08, 0.98, 0.92])
+        plt.savefig(path, dpi=DPI, bbox_inches='tight', facecolor=fig.get_facecolor())
+        plt.close(fig)
+
+        logger.info(f"Создана радарная диаграмма сравнения: {path}")
+        return path
+
+    except Exception as e:
+        logger.error(f"Ошибка создания радарной диаграммы: {e}")
+        return None

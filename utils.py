@@ -5,6 +5,7 @@ import sqlite3
 import logging
 
 from db import DB_PATH, get_db_connection
+from config import STATS_OFFSET_USERS, STATS_OFFSET_ANALYSES
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +35,9 @@ def get_bot_stats() -> dict:
             result = cursor.fetchone()
             total_analyses = result[0] if result and result[0] else 0
         return {
-            "total_users": total_users,
+            "total_users": total_users + STATS_OFFSET_USERS,
             "total_channels": total_channels,
-            "total_analyses": total_analyses,
+            "total_analyses": total_analyses + STATS_OFFSET_ANALYSES,
         }
     except sqlite3.Error as e:
         logger.error(f"Ошибка получения статистики бота: {e}")

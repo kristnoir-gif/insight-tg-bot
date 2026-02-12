@@ -21,6 +21,7 @@ from handlers.common import (
     get_prices,
     get_ab_group,
     SUPPORT_PRICE,
+    notify_admin_payment,
 )
 
 logger = logging.getLogger(__name__)
@@ -204,7 +205,7 @@ async def handle_successful_payment(message: Message) -> None:
 
     if payload == "pack_1":
         process_pack_payment(user.id, 1, payment.total_amount, "telegram_stars", f"pack_1_{group}")
-        record_payment("pack_1", payment.total_amount)
+        record_payment("pack_1", payment.total_amount, group)
         log_buy_click(user.id, f"paid_pack_1_{group}")
         await message.answer(
             "✅ *Спасибо за покупку!*\n\n"
@@ -212,10 +213,11 @@ async def handle_successful_payment(message: Message) -> None:
             "Отправьте юзернейм канала для полного анализа!",
             parse_mode="Markdown",
         )
+        await notify_admin_payment("1 анализ", payment.total_amount, group)
     elif payload == "pack_3":
         result = process_pack_payment(user.id, 3, payment.total_amount, "telegram_stars", f"pack_3_{group}")
         logger.info(f"💰 Платеж pack_3: user={user.id}, result={result} (группа {group})")
-        record_payment("pack_3", payment.total_amount)
+        record_payment("pack_3", payment.total_amount, group)
         log_buy_click(user.id, f"paid_pack_3_{group}")
         await message.answer(
             "✅ *Спасибо за покупку!*\n\n"
@@ -229,9 +231,10 @@ async def handle_successful_payment(message: Message) -> None:
             "Отправьте юзернейм канала!",
             parse_mode="Markdown",
         )
+        await notify_admin_payment("3 анализа", payment.total_amount, group)
     elif payload == "pack_10":
         process_pack_payment(user.id, 10, payment.total_amount, "telegram_stars", f"pack_10_{group}")
-        record_payment("pack_10", payment.total_amount)
+        record_payment("pack_10", payment.total_amount, group)
         log_buy_click(user.id, f"paid_pack_10_{group}")
         await message.answer(
             "✅ *Спасибо за покупку!*\n\n"
@@ -239,20 +242,23 @@ async def handle_successful_payment(message: Message) -> None:
             "Отправьте юзернейм канала для полного анализа!",
             parse_mode="Markdown",
         )
+        await notify_admin_payment("10 анализов", payment.total_amount, group)
     elif payload == "support":
         log_payment(user.id, stars=payment.total_amount, payment_method="telegram_stars", notes="support")
-        record_payment("support", payment.total_amount)
+        record_payment("support", payment.total_amount, group)
         await message.answer(
             "💎 *Огромное спасибо за поддержку проекта!*\n\n"
             "Ваш вклад помогает развивать бот и делать его лучше.\n"
             "Мы очень ценим вашу поддержку! 🙏",
             parse_mode="Markdown",
         )
+        await notify_admin_payment("Поддержка", payment.total_amount, group)
     elif payload == "donate":
         log_payment(user.id, stars=payment.total_amount, payment_method="telegram_stars", notes="donate")
-        record_payment("donate", payment.total_amount)
+        record_payment("donate", payment.total_amount, group)
         await message.answer(
             "❤️ *Спасибо за поддержку!*\n\n"
             "Ваш донат очень ценен для развития бота!",
             parse_mode="Markdown",
         )
+        await notify_admin_payment("Донат", payment.total_amount, group)

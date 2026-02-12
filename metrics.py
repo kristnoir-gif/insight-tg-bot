@@ -24,7 +24,7 @@ floodwait_events_total = Counter(
 payments_total = Counter(
     'bot_payments_total',
     'Total payments received',
-    ['pack']  # pack_3, pack_10, pack_50, donate
+    ['pack', 'group']  # pack_1, pack_3, pack_10, support, donate + A/B group
 )
 
 payments_stars_total = Counter(
@@ -125,9 +125,9 @@ def record_floodwait(account: str):
     floodwait_events_total.labels(account=account).inc()
 
 
-def record_payment(pack: str, stars: int):
+def record_payment(pack: str, stars: int, group: str = ""):
     """Записывает платёж."""
-    payments_total.labels(pack=pack).inc()
+    payments_total.labels(pack=pack, group=group).inc()
     payments_stars_total.inc(stars)
 
 

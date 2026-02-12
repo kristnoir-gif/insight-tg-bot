@@ -10,6 +10,8 @@ from visualization.charts import (
     generate_hour_chart,
     generate_names_chart,
     generate_phrases_chart,
+    generate_heatmap_chart,
+    generate_comparison_chart,
 )
 
 __all__ = [
@@ -21,4 +23,6 @@ __all__ = [
     "generate_hour_chart",
     "generate_names_chart",
     "generate_phrases_chart",
+    "generate_heatmap_chart",
+    "generate_comparison_chart",
 ]

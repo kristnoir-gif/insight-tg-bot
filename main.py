@@ -31,12 +31,12 @@ from config import (
     validate_config,
 )
 from handlers import router, set_bot_instance
+from handlers.common import cleanup_rate_limits, notify_admin
 from client_pool import get_client_pool, init_client_pool
 from config import ADMIN_ID, ADMIN_IDS, CACHE_TTL_FULL, PENDING_CHECK_INTERVAL, PENDING_BATCH_SIZE, FREE_MESSAGE_LIMIT, DEFAULT_MESSAGE_LIMIT
 from db import init_db, check_user_access, consume_analysis, update_pending_status, remove_pending_analysis, get_db_connection, cleanup_old_records, DB_PATH, get_next_pending_batch
 from metrics import setup_metrics_endpoint, init_metrics, update_account_metrics, update_cache_metrics
-from utils import format_number, get_bot_stats
-from handlers.common import cleanup_rate_limits
+from utils import format_number, format_bot_description, get_bot_stats, cleanup_analysis_files
 
 
 def setup_logging() -> None:
@@ -48,14 +48,6 @@ def setup_logging() -> None:
             logging.StreamHandler(sys.stdout),
         ]
     )
-
-
-async def notify_admin(bot: Bot, message: str) -> None:
-    """Отправляет уведомление админу."""
-    try:
-        await bot.send_message(ADMIN_ID, message)
-    except TelegramAPIError as e:
-        logging.error(f"Не удалось отправить уведомление админу: {e}")
 
 
 async def update_bot_description(bot: Bot, logger: logging.Logger) -> None:
@@ -78,13 +70,7 @@ async def update_bot_description(bot: Bot, logger: logging.Logger) -> None:
                 await asyncio.sleep(60)
                 continue
 
-            # Обновляем short_description (показывается в шапке)
-            short_desc = (
-                f"📊 Анализ Telegram-каналов\n"
-                f"👥 {format_number(total_users)} пользователей\n"
-                f"📈 {format_number(total_channels)} каналов | {format_number(total_analyses)} анализов"
-            )
-
+            short_desc = format_bot_description(total_users, total_channels, total_analyses)
             await bot.set_my_short_description(short_description=short_desc)
             logger.info(f"✅ Описание бота обновлено: {total_users} users, {total_channels} channels, {total_analyses} analyses")
 
@@ -221,13 +207,7 @@ async def _send_analysis_result(bot: Bot, user_id: int, result, use_lite: bool, 
             emoji_text += f"{emo} x {count}\n"
         await bot.send_message(user_id, emoji_text)
 
-    # Удаление временных файлов
-    for path in result.get_all_paths():
-        try:
-            if os.path.exists(path):
-                os.remove(path)
-        except OSError:
-            pass
+    cleanup_analysis_files(result)
 
 
 async def auto_process_pending_analyses(bot: Bot, logger: logging.Logger) -> None:
@@ -442,7 +422,7 @@ async def main() -> None:
                 f"Невалидные сессии: {', '.join(failed_sessions) if failed_sessions else 'нет файлов сессий'}\n\n"
                 f"Запустите `python create_session.py <имя>` на сервере."
             )
-            await notify_admin(bot, error_msg)
+            await notify_admin(error_msg)
             raise RuntimeError("Нет доступных Telethon клиентов. Бот не может работать без них.")
 
         # Уведомляем админа о проблемных сессиях
@@ -531,11 +511,7 @@ async def main() -> None:
             total_channels = stats["total_channels"]
             total_analyses = stats["total_analyses"]
 
-            short_desc = (
-                f"📊 Анализ Telegram-каналов\n"
-                f"👥 {format_number(total_users)} пользователей\n"
-                f"📈 {format_number(total_channels)} каналов | {format_number(total_analyses)} анализов"
-            )
+            short_desc = format_bot_description(total_users, total_channels, total_analyses)
             await bot.set_my_short_description(short_description=short_desc)
             logger.info(f"✅ Описание бота установлено: {total_users} users, {total_channels} channels, {total_analyses} analyses")
         except TelegramAPIError as api_error:
@@ -544,7 +520,7 @@ async def main() -> None:
             logger.error(f"Неожиданная ошибка при установке описания бота: {e}", exc_info=True)
 
         # Уведомляем админа о запуске
-        await notify_admin(bot, f"✅ Бот запущен\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
+        await notify_admin(f"✅ Бот запущен\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
 
         # Запуск polling
         await dp.start_polling(bot, skip_updates=True)

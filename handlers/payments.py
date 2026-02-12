@@ -77,61 +77,45 @@ async def handle_buy_button(message: types.Message) -> None:
     await cmd_buy(message)
 
 
-@router.callback_query(F.data == "buy_pack_1")
-async def callback_buy_pack_1(callback: types.CallbackQuery) -> None:
-    """Обработчик покупки 1 полного анализа."""
+_PACK_INFO = {
+    "pack_1": {"title": "1 полный анализ", "description": "Попробуйте полный анализ канала: тональность, активность, личности, фразы"},
+    "pack_3": {"title": "3 полных анализа", "description": "Полный анализ 3 каналов: тональность, активность, личности, фразы, эмодзи"},
+    "pack_10": {"title": "10 полных анализов", "description": "Полный анализ 10 каналов"},
+}
+
+
+async def _handle_pack_purchase(callback: types.CallbackQuery, pack: str) -> None:
+    """Общий обработчик покупки пакета анализов."""
     user = callback.from_user
     group = get_ab_group(user.id)
-    logger.info(f"Пользователь {user.id} (@{user.username}) нажал купить 1 полный анализ (группа {group})")
-    log_buy_click(user.id, f"pack_1_{group}")
+    info = _PACK_INFO[pack]
+    logger.info(f"Пользователь {user.id} (@{user.username}) нажал купить {info['title']} (группа {group})")
+    log_buy_click(user.id, f"{pack}_{group}")
     await callback.answer()
 
     prices = get_prices(user.id)
     await callback.message.answer_invoice(
-        title="1 полный анализ",
-        description="Попробуйте полный анализ канала: тональность, активность, личности, фразы",
-        payload="pack_1",
+        title=info["title"],
+        description=info["description"],
+        payload=pack,
         currency="XTR",
-        prices=[LabeledPrice(label="1 полный анализ", amount=prices['pack_1'])],
+        prices=[LabeledPrice(label=info["title"], amount=prices[pack])],
     )
+
+
+@router.callback_query(F.data == "buy_pack_1")
+async def callback_buy_pack_1(callback: types.CallbackQuery) -> None:
+    await _handle_pack_purchase(callback, "pack_1")
 
 
 @router.callback_query(F.data == "buy_pack_3")
 async def callback_buy_pack_3(callback: types.CallbackQuery) -> None:
-    """Обработчик покупки пакета 3 полных анализов."""
-    user = callback.from_user
-    group = get_ab_group(user.id)
-    logger.info(f"Пользователь {user.id} (@{user.username}) нажал купить 3 полных анализа (группа {group})")
-    log_buy_click(user.id, f"pack_3_{group}")
-    await callback.answer()
-
-    prices = get_prices(user.id)
-    await callback.message.answer_invoice(
-        title="3 полных анализа",
-        description="Полный анализ 3 каналов: тональность, активность, личности, фразы, эмодзи",
-        payload="pack_3",
-        currency="XTR",
-        prices=[LabeledPrice(label="3 полных анализа", amount=prices['pack_3'])],
-    )
+    await _handle_pack_purchase(callback, "pack_3")
 
 
 @router.callback_query(F.data == "buy_pack_10")
 async def callback_buy_pack_10(callback: types.CallbackQuery) -> None:
-    """Обработчик покупки пакета 10 полных анализов."""
-    user = callback.from_user
-    group = get_ab_group(user.id)
-    logger.info(f"Пользователь {user.id} (@{user.username}) нажал купить 10 полных анализов (группа {group})")
-    log_buy_click(user.id, f"pack_10_{group}")
-    await callback.answer()
-
-    prices = get_prices(user.id)
-    await callback.message.answer_invoice(
-        title="10 полных анализов",
-        description="Полный анализ 10 каналов",
-        payload="pack_10",
-        currency="XTR",
-        prices=[LabeledPrice(label="10 полных анализов", amount=prices['pack_10'])],
-    )
+    await _handle_pack_purchase(callback, "pack_10")
 
 
 @router.callback_query(F.data == "support")

@@ -1267,44 +1267,6 @@ def get_all_channels_for_admin() -> list[dict]:
         return []
 
 
-async def cleanup_old_records_async(days: int = 30) -> int:
-    """Асинхронно удаляет записи floodwait_events батчами по 1000 для избежания блокировки БД.
-
-    Returns:
-        Количество удалённых записей.
-    """
-    import asyncio
-    total_deleted = 0
-    batch_size = 1000
-
-    try:
-        while True:
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
-                # Удаляем батчами по 1000 записей
-                cursor.execute(
-                    f"DELETE FROM floodwait_events WHERE rowid IN "
-                    f"(SELECT rowid FROM floodwait_events WHERE created_at < datetime('now', ?) LIMIT {batch_size})",
-                    (f"-{days} days",),
-                )
-                deleted = cursor.rowcount
-                conn.commit()
-
-            if deleted == 0:
-                break
-
-            total_deleted += deleted
-            # Пауза между батчами для снижения нагрузки на БД
-            await asyncio.sleep(0.1)
-
-        if total_deleted > 0:
-            logger.info(f"Очищено {total_deleted} старых floodwait_events (старше {days} дней)")
-        return total_deleted
-    except sqlite3.Error as e:
-        logger.error(f"Ошибка очистки старых записей: {e}")
-        return total_deleted
-
-
 def cleanup_old_records(days: int = 30) -> int:
     """Синхронно удаляет записи floodwait_events батчами по 1000.
 

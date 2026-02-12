@@ -63,71 +63,55 @@ def get_bot_instance() -> Bot | None:
     return _bot_instance
 
 
+async def notify_admin(message: str, parse_mode: str = "Markdown") -> bool:
+    """Отправляет уведомление админу. Возвращает True при успехе."""
+    from config import ADMIN_ID
+    if not _bot_instance:
+        return False
+    try:
+        await _bot_instance.send_message(ADMIN_ID, message, parse_mode=parse_mode)
+        return True
+    except TelegramAPIError as e:
+        logger.error(f"Не удалось уведомить админа: {e}")
+        return False
+
+
 async def notify_admin_flood(wait_seconds: int, channel: str) -> None:
     """Уведомляет админа о FloodWait."""
-    from config import ADMIN_ID
     from client_pool import get_client_pool
-    if _bot_instance:
-        try:
-            pool = get_client_pool()
-            status = pool.status()
-            accounts_info = ""
-            for acc in status.get('accounts', []):
-                state = "+" if acc.get('available') else f"... {acc.get('cooldown_remaining', 0)//60}мин"
-                accounts_info += f"  {acc['name']}: {state}\n"
+    pool = get_client_pool()
+    status = pool.status()
+    accounts_info = ""
+    for acc in status.get('accounts', []):
+        state = "+" if acc.get('available') else f"... {acc.get('cooldown_remaining', 0)//60}мин"
+        accounts_info += f"  {acc['name']}: {state}\n"
 
-            await _bot_instance.send_message(
-                ADMIN_ID,
-                f"*Все аккаунты в FloodWait!*\n\n"
-                f"Канал: `{channel}`\n"
-                f"Ожидание: ~{wait_seconds // 60} мин\n\n"
-                f"Аккаунты:\n{accounts_info}",
-                parse_mode="Markdown"
-            )
-        except TelegramAPIError as e:
-            logger.error(f"Не удалось уведомить админа о FloodWait: {e}")
-
-
-async def notify_admin_paid_user_error(user_id: int, username: str, channel: str, error: str) -> None:
-    """Уведомляет админа об ошибке анализа платного пользователя."""
-    from config import ADMIN_ID
-    if _bot_instance:
-        try:
-            await _bot_instance.send_message(
-                ADMIN_ID,
-                f"*Ошибка анализа платного пользователя*\n\n"
-                f"Пользователь: {user_id} (@{username})\n"
-                f"Канал: `{channel}`\n"
-                f"Ошибка: {error[:100]}...",
-                parse_mode="Markdown"
-            )
-        except TelegramAPIError as e:
-            logger.error(f"Не удалось уведомить админа об ошибке платного пользователя: {e}")
+    await notify_admin(
+        f"*Все аккаунты в FloodWait!*\n\n"
+        f"Канал: `{channel}`\n"
+        f"Ожидание: ~{wait_seconds // 60} мин\n\n"
+        f"Аккаунты:\n{accounts_info}"
+    )
 
 
 async def notify_admin_error(error_type: str, details: str) -> None:
     """Уведомляет админа о любой ошибке/поломке."""
-    from config import ADMIN_ID
-    if _bot_instance:
-        try:
-            await _bot_instance.send_message(
-                ADMIN_ID,
-                f"*{error_type}*\n\n{details[:500]}",
-                parse_mode="Markdown"
-            )
-        except TelegramAPIError as e:
-            logger.error(f"Не удалось уведомить админа: {e}")
+    await notify_admin(f"*{error_type}*\n\n{details[:500]}")
 
 
 async def notify_admin_payment(pack: str, stars: int, group: str = "") -> None:
     """Уведомляет админа о новой оплате."""
-    from config import ADMIN_ID
-    if _bot_instance:
-        try:
-            group_suffix = f" ({group})" if group else ""
-            await _bot_instance.send_message(ADMIN_ID, f"💰 {pack}: {stars}⭐{group_suffix}")
-        except TelegramAPIError as e:
-            logger.error(f"Не удалось уведомить админа о платеже: {e}")
+    group_suffix = f" ({group})" if group else ""
+    await notify_admin(f"💰 {pack}: {stars}⭐{group_suffix}", parse_mode=None)
+
+
+def format_wait_time(wait_seconds: int) -> str:
+    """Форматирует время ожидания в строку '5 мин 30 сек' или '45 сек'."""
+    wait_minutes = wait_seconds // 60
+    wait_sec_remainder = wait_seconds % 60
+    if wait_minutes > 0:
+        return f"{wait_minutes} мин {wait_sec_remainder} сек"
+    return f"{wait_seconds} сек"
 
 
 def _check_rate_limit(user_id: int) -> tuple[bool, int]:

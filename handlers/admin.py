@@ -121,17 +121,13 @@ async def cmd_update_description(message: types.Message) -> None:
         return
 
     try:
-        from utils import format_number, get_bot_stats
+        from utils import get_bot_stats, format_bot_description
         stats = get_bot_stats()
         total_users = stats["total_users"]
         total_channels = stats["total_channels"]
         total_analyses = stats["total_analyses"]
 
-        short_desc = (
-            f"📊 Анализ Telegram-каналов\n"
-            f"👥 {format_number(total_users)} пользователей\n"
-            f"📈 {format_number(total_channels)} каналов | {format_number(total_analyses)} анализов"
-        )
+        short_desc = format_bot_description(total_users, total_channels, total_analyses)
 
         # Обновляем описание
         bot_instance = get_bot_instance()

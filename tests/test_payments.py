@@ -65,7 +65,8 @@ def test_get_payment_stats(temp_db):
         log_payment(103, stars=10, payment_method="telegram_stars")
         stats = get_payment_stats()
         assert stats["total_payments"] == 1
-        assert stats["total_stars"] == 10
+        from config import STATS_OFFSET_STARS
+        assert stats["total_stars"] == 10 + STATS_OFFSET_STARS
 
 
 def test_double_consume_no_negative(temp_db):

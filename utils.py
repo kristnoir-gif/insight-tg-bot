@@ -1,6 +1,7 @@
 """
 Утилиты общего назначения.
 """
+import os
 import sqlite3
 import logging
 
@@ -15,6 +16,15 @@ def format_number(n: int) -> str:
     if n >= 1000:
         return f"{n / 1000:.1f}K".replace(".0K", "K")
     return str(n)
+
+
+def format_bot_description(total_users: int, total_channels: int, total_analyses: int) -> str:
+    """Формирует short description бота со статистикой."""
+    return (
+        f"📊 Анализ Telegram-каналов\n"
+        f"👥 {format_number(total_users)} пользователей\n"
+        f"📈 {format_number(total_channels)} каналов | {format_number(total_analyses)} анализов"
+    )
 
 
 def get_bot_stats() -> dict:
@@ -42,3 +52,13 @@ def get_bot_stats() -> dict:
     except sqlite3.Error as e:
         logger.error(f"Ошибка получения статистики бота: {e}")
         return {"total_users": 0, "total_channels": 0, "total_analyses": 0}
+
+
+def cleanup_analysis_files(result) -> None:
+    """Удаляет временные файлы результата анализа."""
+    for path in result.get_all_paths():
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass

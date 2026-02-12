@@ -1,6 +1,7 @@
 """Tests for utils.py — format_number, get_bot_stats."""
 from unittest.mock import patch
 
+from config import STATS_OFFSET_USERS, STATS_OFFSET_ANALYSES
 from utils import format_number, get_bot_stats
 
 
@@ -30,15 +31,15 @@ def test_get_bot_stats(temp_db):
         log_channel_analysis("test_ch", "Test Channel", 100, analyzed_by=1)
 
         stats = get_bot_stats()
-        assert stats["total_users"] == 2
+        assert stats["total_users"] == 2 + STATS_OFFSET_USERS
         assert stats["total_channels"] == 1
-        assert stats["total_analyses"] >= 1
+        assert stats["total_analyses"] >= 1 + STATS_OFFSET_ANALYSES
 
 
 def test_get_bot_stats_empty(temp_db):
     """get_bot_stats works on empty DB."""
     with patch("db.DB_PATH", temp_db), patch("utils.DB_PATH", temp_db):
         stats = get_bot_stats()
-        assert stats["total_users"] == 0
+        assert stats["total_users"] == STATS_OFFSET_USERS
         assert stats["total_channels"] == 0
-        assert stats["total_analyses"] == 0
+        assert stats["total_analyses"] == STATS_OFFSET_ANALYSES

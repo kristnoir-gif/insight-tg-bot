@@ -13,6 +13,7 @@ from aiogram.types import FSInputFile, InputMediaPhoto
 
 from client_pool import get_client_pool
 from analyzer import analyze_channel_web
+from utils import cleanup_analysis_files
 from metrics import record_analysis
 from config import DEFAULT_MESSAGE_LIMIT, FREE_MESSAGE_LIMIT
 from db import (
@@ -38,6 +39,7 @@ from handlers.common import (
     _user_got_floodwait,
     notify_admin_flood,
     notify_admin_error,
+    format_wait_time,
     is_writing_review,
     set_writing_review,
     clear_writing_review,
@@ -255,13 +257,7 @@ async def cmd_compare(message: types.Message) -> None:
     # Проверяем rate limit (считается как 1 анализ)
     can_proceed, wait_seconds = await check_and_update_rate_limit(user.id)
     if not can_proceed:
-        wait_minutes = wait_seconds // 60
-        wait_sec_remainder = wait_seconds % 60
-        if wait_minutes > 0:
-            time_str = f"{wait_minutes} мин {wait_sec_remainder} сек"
-        else:
-            time_str = f"{wait_seconds} сек"
-        await message.answer(f"⏳ Подождите {time_str} перед следующим запросом.")
+        await message.answer(f"⏳ Подождите {format_wait_time(wait_seconds)} перед следующим запросом.")
         return
 
     status_msg = await message.answer("⏳ Анализирую каналы... Это займёт 20-30 секунд")
@@ -367,12 +363,7 @@ async def cmd_compare(message: types.Message) -> None:
 
         # Удаляем временные файлы от анализов
         for result in [result1, result2]:
-            for path in result.get_all_paths():
-                try:
-                    if os.path.exists(path):
-                        os.remove(path)
-                except OSError:
-                    pass
+            cleanup_analysis_files(result)
 
         logger.info(f"Сравнение каналов {channel1} vs {channel2} для user {user.id}")
         record_analysis("success")
@@ -563,13 +554,7 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
     # Проверяем rate limit (защита от спама) — атомарная проверка + обновление
     can_proceed, wait_seconds = await check_and_update_rate_limit(user.id)
     if not can_proceed:
-        wait_minutes = wait_seconds // 60
-        wait_sec_remainder = wait_seconds % 60
-        if wait_minutes > 0:
-            time_str = f"{wait_minutes} мин {wait_sec_remainder} сек"
-        else:
-            time_str = f"{wait_seconds} сек"
-
+        time_str = format_wait_time(wait_seconds)
         if user.id in _user_got_floodwait:
             await message.answer(
                 f"⏳ *Пожалуйста, подождите*\n\n"
@@ -842,13 +827,7 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
         # Записываем в статистику каналов
         log_channel_analysis(str(channel), result.title, result.subscribers, analyzed_by=user.id)
 
-        # Удаление временных файлов (только если не кэшированный результат)
-        for path in result.get_all_paths():
-            try:
-                if os.path.exists(path):
-                    os.remove(path)
-            except OSError as e:
-                logger.warning(f"Не удалось удалить файл {path}: {e}")
+        cleanup_analysis_files(result)
 
     except Exception as e:
         logger.exception(f"Неожиданная ошибка при анализе канала {channel}")

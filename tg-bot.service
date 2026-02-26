@@ -3,12 +3,13 @@ Description=Telegram Analytics Bot
 After=network.target
 
 [Service]
-Type=simple
+Type=notify
 User=root
 WorkingDirectory=/opt/bot_tg
 ExecStart=/usr/bin/python3 /opt/bot_tg/main.py
 Restart=always
 RestartSec=10
+WatchdogSec=120
 
 [Install]
 WantedBy=multi-user.target

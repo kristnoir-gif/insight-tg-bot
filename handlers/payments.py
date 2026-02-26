@@ -2,10 +2,11 @@
 Обработчики платежей: /buy, pre_checkout, successful_payment, callback_buy_*.
 """
 import logging
+import os
 
 from aiogram import Router, types, F
 from aiogram.filters import Command
-from aiogram.types import LabeledPrice, PreCheckoutQuery, Message
+from aiogram.types import LabeledPrice, PreCheckoutQuery, Message, InputMediaPhoto, FSInputFile
 
 from metrics import record_payment
 from db import (
@@ -28,6 +29,37 @@ logger = logging.getLogger(__name__)
 
 router = Router()
 
+EXAMPLE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "example")
+EXAMPLE_CHANNEL = "новый положняк"
+EXAMPLE_ORDER = [
+    "cloud.png", "graph.png", "mats.png", "positive.png",
+    "aggressive.png", "weekday.png", "hour.png",
+    "names.png", "phrases.png", "register.png", "dichotomy.png",
+]
+
+
+async def _send_example(message: types.Message) -> None:
+    """Отправляет пример полного анализа."""
+    media = []
+    for i, filename in enumerate(EXAMPLE_ORDER):
+        path = os.path.join(EXAMPLE_DIR, filename)
+        if not os.path.exists(path):
+            continue
+        if i == 0:
+            media.append(InputMediaPhoto(
+                media=FSInputFile(path),
+                caption=(
+                    f"📋 <b>Пример полного анализа</b>\n"
+                    f"Канал: {EXAMPLE_CHANNEL}\n\n"
+                    f"Вот что вы получите при покупке:"
+                ),
+                parse_mode="HTML",
+            ))
+        else:
+            media.append(InputMediaPhoto(media=FSInputFile(path)))
+    if media:
+        await message.answer_media_group(media=media)
+
 
 @router.message(Command("buy"))
 async def cmd_buy(message: types.Message) -> None:
@@ -41,6 +73,9 @@ async def cmd_buy(message: types.Message) -> None:
     log_buy_click(user.id, f"open_menu_{group}")
 
     status = check_user_access(user.id)
+
+    # Отправляем пример анализа
+    await _send_example(message)
 
     # Формируем информацию о текущем статусе
     status_text = ""
@@ -57,14 +92,6 @@ async def cmd_buy(message: types.Message) -> None:
     await message.answer(
         f"💎 *Полный анализ канала*\n\n"
         f"{status_text}"
-        f"*Что входит в полный анализ:*\n"
-        f"• Облако слов + топ-15\n"
-        f"• Анализ тональности\n"
-        f"• Мат-облако\n"
-        f"• Активность по дням/часам\n"
-        f"• Упоминаемые личности\n"
-        f"• Популярные фразы\n"
-        f"• Топ-20 эмодзи\n\n"
         f"Выберите пакет:",
         parse_mode="Markdown",
         reply_markup=_get_buy_keyboard(user.id),

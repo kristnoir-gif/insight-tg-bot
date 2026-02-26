@@ -188,6 +188,113 @@ async def cmd_queue(message: types.Message) -> None:
     )
 
 
+@router.message(Command("pdf"))
+async def cmd_pdf(message: types.Message) -> None:
+    """Экспортирует последний анализ канала в PDF."""
+    if not await _check_access(message):
+        return
+
+    user = message.from_user
+    register_user(user.id, user.username)
+
+    text = message.text or ""
+    parts = text.split()[1:]  # Убираем /pdf
+
+    if not parts:
+        await message.answer(
+            "📄 *PDF-отчёт*\n\n"
+            "Укажите канал:\n"
+            "`/pdf @durov`\n"
+            "`/pdf durov`",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Извлекаем username
+    raw = parts[0].strip().lstrip("@")
+    if "t.me/" in raw:
+        raw = raw.split("t.me/")[-1]
+    channel = raw.split("?")[0].strip()
+
+    if not channel:
+        await message.answer("❌ Не удалось распознать канал.", parse_mode="Markdown")
+        return
+
+    # Проверяем доступ — PDF генерируется из кэша (нужен предварительный анализ)
+    access = check_user_access(user.id)
+    is_paid = access.paid_balance > 0 or access.is_premium or is_admin(user.id)
+
+    if not is_paid:
+        await message.answer(
+            "💎 *PDF-отчёт доступен для платных пользователей*\n\n"
+            "Купите анализы за ⭐ чтобы получить PDF-отчёт:",
+            parse_mode="Markdown",
+            reply_markup=_get_buy_keyboard(),
+        )
+        return
+
+    status_msg = await message.answer("📄 Генерирую PDF-отчёт...")
+
+    try:
+        from analyzer import _is_cache_valid, _load_from_cache
+
+        channel_key = channel.lower()
+        if not _is_cache_valid(channel_key):
+            await status_msg.delete()
+            await message.answer(
+                "❌ *Кэш анализа не найден*\n\n"
+                f"Сначала выполните анализ канала `{channel}`,\n"
+                "затем запросите PDF.",
+                parse_mode="Markdown",
+            )
+            return
+
+        cached = _load_from_cache(channel_key, require_full=False)
+        if not cached or not cached.cloud_path:
+            await status_msg.delete()
+            await message.answer("❌ Не удалось загрузить кэш анализа. Выполните анализ заново.")
+            return
+
+        from visualization.pdf_export import generate_pdf_report
+        import asyncio
+        import functools
+
+        loop = asyncio.get_event_loop()
+        pdf_path = await loop.run_in_executor(
+            None, functools.partial(generate_pdf_report, cached, channel)
+        )
+
+        if not pdf_path or not os.path.exists(pdf_path):
+            await status_msg.delete()
+            await message.answer("❌ Не удалось сгенерировать PDF. Попробуйте позже.")
+            return
+
+        await message.answer_document(
+            document=FSInputFile(pdf_path),
+            caption=f"📄 PDF-отчёт: {cached.title or channel}",
+        )
+
+        # Удаляем временный PDF и файлы кэша
+        try:
+            os.remove(pdf_path)
+        except OSError:
+            pass
+        from utils import cleanup_analysis_files
+        cleanup_analysis_files(cached)
+
+        logger.info(f"PDF отчёт отправлен: {channel} → user {user.id}")
+
+    except Exception as e:
+        logger.exception(f"Ошибка генерации PDF для {channel}")
+        await message.answer("❌ Ошибка генерации PDF. Попробуйте позже.")
+
+    finally:
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+
+
 @router.message(Command("compare"))
 async def cmd_compare(message: types.Message) -> None:
     """Сравнивает два канала."""

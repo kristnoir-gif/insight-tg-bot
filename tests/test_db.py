@@ -13,6 +13,8 @@ from db import (
     get_next_pending_batch,
     get_user_pending_queue,
     remove_pending_analysis,
+    reset_processing_to_pending,
+    update_pending_status,
 )
 from config import ADMIN_IDS
 
@@ -208,3 +210,39 @@ def test_remove_pending_clears_from_queue(temp_db):
         # Second user should now be position 1
         pos2_new = get_queue_position(101, "ch2")
         assert pos2_new == 1
+
+
+def test_reset_processing_to_pending(temp_db):
+    """reset_processing_to_pending resets 'processing' items back to 'pending'."""
+    with patch("db.DB_PATH", temp_db):
+        import time
+        add_pending_analysis(100, "ch1", "@ch1", priority=0)
+        time.sleep(0.01)
+        add_pending_analysis(101, "ch2", "@ch2", priority=2)
+
+        # Ставим первый в processing
+        from db import get_db_connection
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM pending_analyses WHERE channel_key = 'ch1'")
+            aid = cursor.fetchone()[0]
+        update_pending_status(aid, 'processing')
+
+        # Сбрасываем
+        count = reset_processing_to_pending()
+        assert count == 1
+
+        # Проверяем что ch1 снова pending
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT status FROM pending_analyses WHERE channel_key = 'ch1'")
+            status = cursor.fetchone()[0]
+        assert status == 'pending'
+
+
+def test_reset_processing_no_processing(temp_db):
+    """reset_processing_to_pending returns 0 when nothing to reset."""
+    with patch("db.DB_PATH", temp_db):
+        add_pending_analysis(100, "ch1", "@ch1", priority=0)
+        count = reset_processing_to_pending()
+        assert count == 0

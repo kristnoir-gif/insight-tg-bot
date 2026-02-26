@@ -1071,6 +1071,31 @@ def get_pending_analyses_for_user(user_id: int) -> list[dict]:
         return []
 
 
+def reset_processing_to_pending() -> int:
+    """Сбрасывает все 'processing' анализы обратно в 'pending'.
+
+    Вызывается при graceful shutdown, чтобы незавершённые анализы
+    вернулись в очередь для повторной обработки.
+
+    Returns:
+        Количество сброшенных записей.
+    """
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE pending_analyses SET status = 'pending' WHERE status = 'processing'"
+            )
+            count = cursor.rowcount
+            conn.commit()
+            if count > 0:
+                logger.info(f"Сброшено {count} processing → pending при завершении")
+            return count
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка сброса processing → pending: {e}")
+        return 0
+
+
 def update_pending_status(analysis_id: int, status: str) -> None:
     """Обновляет статус pending анализа."""
     try:

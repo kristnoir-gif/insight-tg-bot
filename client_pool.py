@@ -245,29 +245,31 @@ class ClientPool:
 
                 try:
                     # Timeout для защиты от зависаний (3 минуты максимум)
-                    async with asyncio.timeout(180):
-                        async with account.semaphore:
-                            account.last_used = time.time()
-                            account.total_requests += 1
+                    async with account.semaphore:
+                        account.last_used = time.time()
+                        account.total_requests += 1
 
-                            mode_str = "lite" if lite_mode else "full"
-                            logger.info(f"Analyzing {channel} with account {account.name} (user={user_id}, mode={mode_str}, limit={message_limit})")
+                        mode_str = "lite" if lite_mode else "full"
+                        logger.info(f"Analyzing {channel} with account {account.name} (user={user_id}, mode={mode_str}, limit={message_limit})")
 
-                            result = await analyze_channel(
+                        result = await asyncio.wait_for(
+                            analyze_channel(
                                 account.client,
                                 channel,
                                 limit=message_limit,
                                 is_private=is_private,
                                 lite_mode=lite_mode
-                            )
+                            ),
+                            timeout=180,
+                        )
 
-                            if result and result.cloud_path:
-                                # Успех — кэшируем
-                                self._cache.set(cache_key, result)
-                                account.cooldown_until = time.time() + 5  # Мягкий кулдаун после анализа
-                                return result, None
-                            else:
-                                return None, "empty_result"
+                        if result and result.cloud_path:
+                            # Успех — кэшируем
+                            self._cache.set(cache_key, result)
+                            account.cooldown_until = time.time() + 5  # Мягкий кулдаун после анализа
+                            return result, None
+                        else:
+                            return None, "empty_result"
 
                 except FloodWaitError as e:
                     account.failed_requests += 1
@@ -303,7 +305,7 @@ class ClientPool:
                         # Другая ошибка — не пробуем другие аккаунты
                         return None, str(e)
 
-                except TimeoutError:
+                except asyncio.TimeoutError:
                     account.failed_requests += 1
                     logger.warning(f"Timeout (180s) analyzing {channel} with {account.name}")
                     return None, "timeout"

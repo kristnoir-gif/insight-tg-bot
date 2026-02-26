@@ -5,6 +5,8 @@
 import asyncio
 import logging
 import os
+import signal
+import socket
 import sys
 import traceback
 from datetime import datetime
@@ -34,7 +36,7 @@ from handlers import router, set_bot_instance
 from handlers.common import cleanup_rate_limits, notify_admin
 from client_pool import get_client_pool, init_client_pool
 from config import ADMIN_ID, ADMIN_IDS, CACHE_TTL_FULL, PENDING_CHECK_INTERVAL, PENDING_BATCH_SIZE, FREE_MESSAGE_LIMIT, DEFAULT_MESSAGE_LIMIT
-from db import init_db, check_user_access, consume_analysis, update_pending_status, remove_pending_analysis, get_db_connection, cleanup_old_records, DB_PATH, get_next_pending_batch
+from db import init_db, check_user_access, consume_analysis, update_pending_status, remove_pending_analysis, get_db_connection, cleanup_old_records, DB_PATH, get_next_pending_batch, reset_processing_to_pending
 from metrics import setup_metrics_endpoint, init_metrics, update_account_metrics, update_cache_metrics
 from utils import format_number, format_bot_description, get_bot_stats, cleanup_analysis_files
 
@@ -339,6 +341,34 @@ async def _process_single_pending(
         logger.error(f"Auto-retry error for {channel_username}: {e}")
 
 
+def _sd_notify(state: str) -> None:
+    """Отправляет уведомление systemd через sd_notify протокол."""
+    addr = os.environ.get("NOTIFY_SOCKET")
+    if not addr:
+        return
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        if addr.startswith("@"):
+            addr = "\0" + addr[1:]
+        sock.sendto(state.encode(), addr)
+        sock.close()
+    except OSError:
+        pass
+
+
+async def _watchdog_loop(logger: logging.Logger) -> None:
+    """Фоновая задача: отправка WATCHDOG=1 каждые 50 секунд (WatchdogSec=120)."""
+    while True:
+        try:
+            await asyncio.sleep(50)
+            _sd_notify("WATCHDOG=1")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.warning(f"Watchdog loop error: {e}")
+            await asyncio.sleep(10)
+
+
 async def main() -> None:
     """Главная функция запуска бота."""
     setup_logging()
@@ -406,6 +436,16 @@ async def main() -> None:
             logger.warning(f"❌ Не удалось запустить {account_name} клиент ({session_name}): {e}")
             return None
 
+    # Трекинг фоновых задач
+    background_tasks: list[asyncio.Task] = []
+    shutdown_event = asyncio.Event()
+
+    def _schedule_task(coro, name: str = "") -> asyncio.Task:
+        """Создаёт фоновую задачу и добавляет в список для трекинга."""
+        task = asyncio.create_task(coro, name=name)
+        background_tasks.append(task)
+        return task
+
     try:
         # Запускаем все клиенты с небольшими задержками
         await try_start_client(SESSION_NAME, PROXY_MAIN, "main")
@@ -428,7 +468,6 @@ async def main() -> None:
         # Уведомляем админа о проблемных сессиях
         if failed_sessions:
             await notify_admin(
-                bot,
                 f"⚠️ *Некоторые сессии невалидны*\n\n"
                 f"📁 Проблемные: `{', '.join(failed_sessions)}`\n"
                 f"✅ Работают: {pool.status()['total_accounts']} аккаунтов\n\n"
@@ -491,18 +530,26 @@ async def main() -> None:
             await site.start()
             logger.info("HTTP server started: /health and /metrics on http://0.0.0.0:8080")
 
-        asyncio.create_task(_start_http_server())
+        _schedule_task(_start_http_server(), "http_server")
 
-        # Запускаем фоновую задачу для уведомления о pending анализах
-        asyncio.create_task(auto_process_pending_analyses(bot, logger))
+        # Запускаем фоновые задачи
+        _schedule_task(auto_process_pending_analyses(bot, logger), "auto_pending")
+        _schedule_task(update_bot_description(bot, logger), "bot_description")
+        _schedule_task(periodic_cleanup_rate_limits(logger), "cleanup_rate_limits")
+        _schedule_task(periodic_cleanup_disk_cache(logger), "cleanup_disk_cache")
+        _schedule_task(periodic_cleanup_old_db_records(logger), "cleanup_old_records")
+        _schedule_task(_watchdog_loop(logger), "watchdog")
+        _sd_notify("READY=1")
 
-        # Запускаем фоновую задачу для обновления описания бота
-        asyncio.create_task(update_bot_description(bot, logger))
+        # Signal handlers для graceful shutdown
+        loop = asyncio.get_running_loop()
 
-        # Запускаем фоновые задачи очистки
-        asyncio.create_task(periodic_cleanup_rate_limits(logger))
-        asyncio.create_task(periodic_cleanup_disk_cache(logger))
-        asyncio.create_task(periodic_cleanup_old_db_records(logger))
+        def _handle_signal(sig: signal.Signals) -> None:
+            logger.info(f"Получен сигнал {sig.name}, начинаю graceful shutdown...")
+            shutdown_event.set()
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, _handle_signal, sig)
 
         # Обновляем описание сразу при старте
         try:
@@ -522,15 +569,32 @@ async def main() -> None:
         # Уведомляем админа о запуске
         await notify_admin(f"✅ Бот запущен\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
 
-        # Запуск polling
-        await dp.start_polling(bot, skip_updates=True)
+        # Запуск polling в отдельной задаче для возможности graceful shutdown
+        polling_task = asyncio.create_task(
+            dp.start_polling(bot, skip_updates=True), name="polling"
+        )
+
+        # Ждём сигнала завершения или завершения polling
+        done, _ = await asyncio.wait(
+            [polling_task, asyncio.create_task(shutdown_event.wait())],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        # Graceful shutdown
+        if shutdown_event.is_set():
+            logger.info("Graceful shutdown: останавливаю polling...")
+            await dp.stop_polling()
+            polling_task.cancel()
+            try:
+                await polling_task
+            except asyncio.CancelledError:
+                pass
 
     except Exception as e:
         logger.exception(f"Критическая ошибка: {e}")
         # Уведомляем админа о падении
         error_text = traceback.format_exc()[-500:]  # Последние 500 символов
         await notify_admin(
-            bot,
             f"🚨 *Бот упал!*\n\n"
             f"🕐 {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\n\n"
             f"```\n{error_text}\n```"
@@ -538,6 +602,24 @@ async def main() -> None:
         raise
 
     finally:
+        _sd_notify("STOPPING=1")
+
+        # Отменяем все фоновые задачи
+        for task in background_tasks:
+            if not task.done():
+                task.cancel()
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
+            logger.info(f"Отменено {len(background_tasks)} фоновых задач")
+
+        # Сбрасываем processing → pending
+        reset_count = reset_processing_to_pending()
+        if reset_count > 0:
+            logger.info(f"Сброшено {reset_count} processing анализов в pending")
+
+        # Уведомляем админа об остановке
+        await notify_admin(f"⏹ Бот остановлен\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
+
         for client in active_clients:
             try:
                 await client.disconnect()

@@ -13,6 +13,7 @@ from visualization.charts import (
     generate_heatmap_chart,
     generate_comparison_chart,
 )
+from visualization.pdf_export import generate_pdf_report
 
 __all__ = [
     "generate_main_cloud",
@@ -25,4 +26,5 @@ __all__ = [
     "generate_phrases_chart",
     "generate_heatmap_chart",
     "generate_comparison_chart",
+    "generate_pdf_report",
 ]

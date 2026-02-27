@@ -27,3 +27,4 @@ beautifulsoup4>=4.12
 
 # Monitoring
 prometheus-client>=0.19
+sentry-sdk>=2.0

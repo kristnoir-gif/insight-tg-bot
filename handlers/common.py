@@ -46,12 +46,6 @@ async def send_media_group_chunked(target, media: list, bot: "Bot | None" = None
         else:
             await bot.send_media_group(chat_id=chat_id, media=chunk)
 
-# Режим приватного доступа (только для админа)
-PRIVATE_MODE = False
-
-# Белый список пользователей (username без @)
-ALLOWED_USERS = {"ltdnt"}
-
 # A/B тест цен (Telegram Stars)
 PRICES_A = {'pack_1': 20, 'pack_3': 40, 'pack_10': 100}
 PRICES_B = {'pack_1': 50, 'pack_3': 100, 'pack_10': 250}
@@ -217,15 +211,7 @@ def cleanup_rate_limits() -> int:
 
 async def _check_access(message: types.Message) -> bool:
     """Проверяет доступ пользователя. Возвращает True если доступ разрешён."""
-    if not PRIVATE_MODE:
-        return True
-    if is_admin(message.from_user.id):
-        return True
-    # Проверяем username в белом списке
-    if message.from_user.username and message.from_user.username.lower() in ALLOWED_USERS:
-        return True
-    await message.answer("Бот находится в режиме тестирования. Доступ ограничен.")
-    return False
+    return True
 
 
 def _get_emotional_tone(scream_index: float) -> str:

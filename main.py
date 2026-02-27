@@ -35,20 +35,55 @@ from config import (
 from handlers import router, set_bot_instance
 from handlers.common import cleanup_rate_limits, notify_admin
 from client_pool import get_client_pool, init_client_pool
-from config import ADMIN_ID, ADMIN_IDS, CACHE_TTL_FULL, PENDING_CHECK_INTERVAL, PENDING_BATCH_SIZE, FREE_MESSAGE_LIMIT, DEFAULT_MESSAGE_LIMIT
+from config import ADMIN_ID, ADMIN_IDS, CACHE_TTL_FULL, PENDING_CHECK_INTERVAL, PENDING_BATCH_SIZE, FREE_MESSAGE_LIMIT, DEFAULT_MESSAGE_LIMIT, METRICS_PORT, BOT_VERSION
 from db import init_db, check_user_access, consume_analysis, update_pending_status, remove_pending_analysis, get_db_connection, cleanup_old_records, DB_PATH, get_next_pending_batch, reset_processing_to_pending
 from metrics import setup_metrics_endpoint, init_metrics, update_account_metrics, update_cache_metrics
 from utils import format_number, format_bot_description, get_bot_stats, cleanup_analysis_files
 
 
+def setup_sentry() -> None:
+    """Инициализирует Sentry если SENTRY_DSN задан в .env."""
+    from config import SENTRY_DSN
+    if not SENTRY_DSN:
+        return
+    try:
+        import sentry_sdk
+        sentry_sdk.init(
+            dsn=SENTRY_DSN,
+            release=BOT_VERSION,
+            traces_sample_rate=0.1,  # 10% транзакций для performance
+            environment=os.getenv("ENV", "production"),
+        )
+        logging.getLogger(__name__).info("Sentry инициализирован")
+    except ImportError:
+        logging.getLogger(__name__).warning("sentry-sdk не установлен, Sentry отключён")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Не удалось инициализировать Sentry: {e}")
+
+
 def setup_logging() -> None:
-    """Настройка логирования."""
+    """Настройка логирования: stdout (для journald) + файл с ротацией."""
+    from logging.handlers import RotatingFileHandler
+    from config import LOG_FILE, LOG_MAX_BYTES, LOG_BACKUP_COUNT
+
+    handlers: list[logging.Handler] = [
+        logging.StreamHandler(sys.stdout),
+    ]
+
+    # Файловый лог с ротацией (10MB x 5 файлов)
+    try:
+        file_handler = RotatingFileHandler(
+            LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8"
+        )
+        file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
+        handlers.append(file_handler)
+    except OSError as e:
+        print(f"Warning: не удалось открыть лог-файл {LOG_FILE}: {e}", file=sys.stderr)
+
     logging.basicConfig(
         level=LOG_LEVEL,
         format=LOG_FORMAT,
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-        ]
+        handlers=handlers,
     )
 
 
@@ -108,7 +143,8 @@ async def periodic_cleanup_disk_cache(logger: logging.Logger) -> None:
     from pathlib import Path
     from time import time as time_now
 
-    cache_dir = Path("cache")
+    from config import CACHE_DIR
+    cache_dir = Path(CACHE_DIR)
     max_age_seconds = 7 * 24 * 3600  # 7 дней
 
     while True:
@@ -286,6 +322,14 @@ async def _process_single_pending(
         access = check_user_access(user_id)
         if not access.can_analyze:
             update_pending_status(analysis_id, 'skipped')
+            try:
+                await bot.send_message(
+                    user_id,
+                    "❌ Ваш анализ из очереди пропущен — дневной лимит исчерпан.\n"
+                    "💎 Купите анализы: /buy",
+                )
+            except Exception:
+                pass
             return
 
         # Определяем режим
@@ -323,6 +367,15 @@ async def _process_single_pending(
             else:
                 update_pending_status(analysis_id, 'failed')
                 logger.warning(f"Auto-retry failed: {channel_username}: {error}")
+                try:
+                    await bot.send_message(
+                        user_id,
+                        f"❌ Не удалось выполнить анализ `{channel_username}` из очереди.\n"
+                        "Попробуйте снова позже.",
+                        parse_mode="Markdown",
+                    )
+                except Exception:
+                    pass
             return
 
         # Отправляем результат пользователю
@@ -373,6 +426,7 @@ async def _watchdog_loop(logger: logging.Logger) -> None:
 async def main() -> None:
     """Главная функция запуска бота."""
     setup_logging()
+    setup_sentry()
     logger = logging.getLogger(__name__)
 
     if not validate_config():
@@ -478,7 +532,7 @@ async def main() -> None:
         logger.info(f"Бот успешно запущен. Пул: {pool.status()['total_accounts']} аккаунтов")
 
         # Инициализируем метрики
-        init_metrics(bot_username="insight_tg_bot", version="2.0.0")
+        init_metrics(bot_username="insight_tg_bot", version=BOT_VERSION)
 
         # Запускаем HTTP сервер с /health и /metrics
         async def _start_http_server():
@@ -527,9 +581,9 @@ async def main() -> None:
 
             runner = web.AppRunner(app)
             await runner.setup()
-            site = web.TCPSite(runner, '0.0.0.0', 8080)
+            site = web.TCPSite(runner, '0.0.0.0', METRICS_PORT)
             await site.start()
-            logger.info("HTTP server started: /health and /metrics on http://0.0.0.0:8080")
+            logger.info(f"HTTP server started: /health and /metrics on http://0.0.0.0:{METRICS_PORT}")
 
         _schedule_task(_start_http_server(), "http_server")
 
@@ -604,6 +658,7 @@ async def main() -> None:
 
     finally:
         _sd_notify("STOPPING=1")
+        SHUTDOWN_TIMEOUT = 10  # секунд на каждую операцию при shutdown
 
         # Отменяем все фоновые задачи
         for task in background_tasks:
@@ -618,13 +673,20 @@ async def main() -> None:
         if reset_count > 0:
             logger.info(f"Сброшено {reset_count} processing анализов в pending")
 
-        # Уведомляем админа об остановке
-        await notify_admin(f"⏹ Бот остановлен\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
+        # Уведомляем админа об остановке (с таймаутом чтобы не зависнуть)
+        try:
+            await asyncio.wait_for(
+                notify_admin(f"⏹ Бот остановлен\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"),
+                timeout=SHUTDOWN_TIMEOUT,
+            )
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.warning(f"Не удалось уведомить админа при shutdown: {e}")
 
+        # Отключаем Telethon клиенты (с таймаутом на каждый)
         for client in active_clients:
             try:
-                await client.disconnect()
-            except Exception:
+                await asyncio.wait_for(client.disconnect(), timeout=SHUTDOWN_TIMEOUT)
+            except (asyncio.TimeoutError, Exception):
                 pass
         await bot.session.close()
         logger.info("Бот остановлен")

@@ -34,9 +34,6 @@ def get_db_connection():
 # Бесплатный анализ для виральности (если нет очереди)
 FREE_DAILY_LIMIT = 1  # Бесплатных анализов в день (для новых пользователей)
 
-# Кэш
-CACHE_TTL_HOURS = 12  # Время жизни кэша в часах (увеличено для агрессивного кэширования)
-
 
 @dataclass
 class UserStatus:
@@ -729,130 +726,6 @@ def get_floodwait_stats(days: int = 1) -> dict:
         return {"total": 0, "users": 0}
 
 
-# --- Кэш анализов каналов ---
-
-def was_analyzed_recently(channel_key: str, hours: int = 6) -> tuple[bool, str | None]:
-    """
-    Проверяет, анализировался ли канал недавно (для smart caching).
-    
-    Args:
-        channel_key: Ключ канала.
-        hours: Количество часов для проверки свежести.
-    
-    Returns:
-        (был_ли_недавно, last_analyzed_timestamp)
-    """
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT last_analyzed
-                FROM channel_stats
-                WHERE channel_key = ?
-                AND last_analyzed > datetime('now', ?)
-            """, (channel_key.lower(), f'-{hours} hours'))
-            row = cursor.fetchone()
-
-        if row:
-            return True, row[0]
-        return False, None
-    except sqlite3.Error as e:
-        logger.error(f"Ошибка проверки свежести анализа: {e}")
-        return False, None
-
-
-def get_cached_analysis(channel_key: str) -> dict | None:
-    """
-    Получает кэшированный анализ канала если он не истёк.
-
-    Args:
-        channel_key: Ключ канала (username или id).
-
-    Returns:
-        Словарь с данными или None если кэш не найден/истёк.
-    """
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-
-            cursor.execute("""
-                SELECT title, stats_json, top_emojis_json, cached_at
-                FROM channel_cache
-                WHERE channel_key = ?
-            """, (channel_key.lower(),))
-
-            row = cursor.fetchone()
-
-        if not row:
-            return None
-
-        title, stats_json, emojis_json, cached_at_str = row
-
-        # Проверяем TTL
-        cached_at = datetime.fromisoformat(cached_at_str)
-        age_hours = (datetime.now() - cached_at).total_seconds() / 3600
-
-        if age_hours > CACHE_TTL_HOURS:
-            logger.debug(f"Кэш для {channel_key} истёк ({age_hours:.1f}ч)")
-            return None
-
-        return {
-            "title": title,
-            "stats": json.loads(stats_json),
-            "top_emojis": json.loads(emojis_json),
-            "cached_at": cached_at,
-            "age_hours": age_hours,
-        }
-
-    except sqlite3.Error as e:
-        logger.error(f"Ошибка чтения кэша для {channel_key}: {e}")
-        return None
-
-
-def save_analysis_cache(
-    channel_key: str,
-    title: str,
-    stats: object,
-    top_emojis: list
-) -> None:
-    """
-    Сохраняет результат анализа в кэш.
-
-    Args:
-        channel_key: Ключ канала (username или id).
-        title: Название канала.
-        stats: Объект ChannelStats.
-        top_emojis: Список топ эмодзи.
-    """
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-
-            # Конвертируем stats в dict если это dataclass
-            stats_dict = asdict(stats) if hasattr(stats, '__dataclass_fields__') else stats
-
-            cursor.execute("""
-                INSERT INTO channel_cache (channel_key, title, stats_json, top_emojis_json, cached_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(channel_key) DO UPDATE SET
-                    title = excluded.title,
-                    stats_json = excluded.stats_json,
-                    top_emojis_json = excluded.top_emojis_json,
-                    cached_at = excluded.cached_at
-            """, (
-                channel_key.lower(),
-                title,
-                json.dumps(stats_dict, ensure_ascii=False),
-                json.dumps(top_emojis, ensure_ascii=False),
-                datetime.now().isoformat()
-            ))
-
-            conn.commit()
-            logger.info(f"Кэш сохранён для канала: {channel_key}")
-
-    except sqlite3.Error as e:
-        logger.error(f"Ошибка сохранения кэша для {channel_key}: {e}")
-
 def add_pending_analysis(user_id: int, channel_key: str, channel_username: str, priority: int = 0) -> int:
     """
     Добавляет незавершённый анализ в очередь с приоритетом.
@@ -870,9 +743,13 @@ def add_pending_analysis(user_id: int, channel_key: str, channel_username: str, 
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT OR REPLACE INTO pending_analyses
+                INSERT INTO pending_analyses
                 (user_id, channel_key, channel_username, status, priority, created_at)
                 VALUES (?, ?, ?, 'pending', ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id, channel_key) DO UPDATE SET
+                    status = 'pending',
+                    priority = MAX(excluded.priority, pending_analyses.priority),
+                    channel_username = excluded.channel_username
             """, (user_id, channel_key, channel_username, priority))
             conn.commit()
             logger.info(f"Добавлен незавершённый анализ: user={user_id}, channel={channel_key}, priority={priority}")

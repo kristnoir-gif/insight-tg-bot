@@ -619,8 +619,6 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
     """
     Выполняет анализ канала через ClientPool и отправляет результаты.
     """
-    from db import was_analyzed_recently, get_cached_analysis
-
     pool = get_client_pool()
     user = message.from_user
 
@@ -648,16 +646,6 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
     # Определяем тип пользователя для priority queue
     is_paid_user = access.paid_balance > 0 or access.is_premium or is_admin(user.id)
     is_free_user = not is_paid_user
-
-    # SMART CACHING для бесплатных пользователей
-    if is_free_user:
-        channel_key = str(channel).lstrip('@').split('/')[-1].strip().lower()
-        was_recent, last_analyzed = was_analyzed_recently(channel_key, hours=6)
-
-        if was_recent:
-            cached = get_cached_analysis(channel_key)
-            if cached:
-                logger.info(f"Free user {user.id} получил кэшированный анализ {channel_key} (last analyzed: {last_analyzed})")
 
     # Проверяем rate limit (защита от спама) — атомарная проверка + обновление
     can_proceed, wait_seconds = await check_and_update_rate_limit(user.id)

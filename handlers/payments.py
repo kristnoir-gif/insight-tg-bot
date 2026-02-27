@@ -23,6 +23,7 @@ from handlers.common import (
     get_ab_group,
     SUPPORT_PRICE,
     notify_admin_payment,
+    notify_admin_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -196,10 +197,41 @@ async def handle_pre_checkout(pre_checkout: PreCheckoutQuery) -> None:
 
     if expected is not None and amount != expected:
         logger.warning(f"Pre-checkout: сумма {amount} != ожидаемая {expected} для {user_id}, payload={payload}")
+        await notify_admin_error(
+            "Pre-checkout: несовпадение суммы",
+            f"User: {user_id}, payload: `{payload}`\nПолучено: {amount}, ожидалось: {expected}"
+        )
         await pre_checkout.answer(ok=False, error_message="Сумма не совпадает с ценой. Попробуйте снова.")
         return
 
     await pre_checkout.answer(ok=True)
+
+
+_PACK_AMOUNTS = {"pack_1": 1, "pack_3": 3, "pack_10": 10}
+
+_PACK_MESSAGES = {
+    "pack_1": (
+        "✅ *Спасибо за покупку!*\n\n"
+        "💎 На ваш баланс добавлен *1 полный анализ*.\n\n"
+        "Отправьте юзернейм канала для полного анализа!"
+    ),
+    "pack_3": (
+        "✅ *Спасибо за покупку!*\n\n"
+        "💎 На ваш баланс добавлено *3 полных анализа*.\n\n"
+        "Теперь вы получите:\n"
+        "• Облако слов + топ-15\n"
+        "• Анализ тональности\n"
+        "• Мат-облако\n"
+        "• Активность по дням/часам\n"
+        "• Личности, фразы, эмодзи\n\n"
+        "Отправьте юзернейм канала!"
+    ),
+    "pack_10": (
+        "✅ *Спасибо за покупку!*\n\n"
+        "💎 На ваш баланс добавлено *10 полных анализов*.\n\n"
+        "Отправьте юзернейм канала для полного анализа!"
+    ),
+}
 
 
 @router.message(F.successful_payment)
@@ -210,67 +242,75 @@ async def handle_successful_payment(message: Message) -> None:
     payload = payment.invoice_payload
     group = get_ab_group(user.id)
 
-    # Гарантируем что пользователь есть в БД перед добавлением баланса
-    register_user(user.id, user.username)
+    try:
+        # Гарантируем что пользователь есть в БД перед добавлением баланса
+        register_user(user.id, user.username)
 
-    logger.info(f"Успешный платёж от {user.id}: {payload}, {payment.total_amount} Stars (группа {group})")
+        logger.info(f"Успешный платёж от {user.id}: {payload}, {payment.total_amount} Stars (группа {group})")
 
-    if payload == "pack_1":
-        process_pack_payment(user.id, 1, payment.total_amount, "telegram_stars", f"pack_1_{group}")
-        record_payment("pack_1", payment.total_amount, group)
-        log_buy_click(user.id, f"paid_pack_1_{group}")
-        await message.answer(
-            "✅ *Спасибо за покупку!*\n\n"
-            "💎 На ваш баланс добавлен *1 полный анализ*.\n\n"
-            "Отправьте юзернейм канала для полного анализа!",
-            parse_mode="Markdown",
+        if payload in _PACK_AMOUNTS:
+            pack_amount = _PACK_AMOUNTS[payload]
+            success = process_pack_payment(
+                user.id, pack_amount, payment.total_amount,
+                "telegram_stars", f"{payload}_{group}",
+            )
+            if not success:
+                # КРИТИЧНО: деньги списаны, баланс не начислен
+                logger.error(f"PAYMENT FAILED: process_pack_payment вернул False! user={user.id}, payload={payload}, stars={payment.total_amount}")
+                await notify_admin_error(
+                    "PAYMENT FAILED — баланс НЕ начислен!",
+                    f"User: {user.id} (@{user.username})\n"
+                    f"Pack: {payload}, Stars: {payment.total_amount}\n"
+                    f"Группа: {group}\n\n"
+                    f"Нужно начислить вручную: {pack_amount} анализов"
+                )
+                await message.answer(
+                    "❌ Произошла ошибка при начислении баланса.\n"
+                    "Администратор уведомлён и начислит анализы вручную.\n"
+                    "Приносим извинения!",
+                )
+                return
+
+            record_payment(payload, payment.total_amount, group)
+            log_buy_click(user.id, f"paid_{payload}_{group}")
+            await message.answer(_PACK_MESSAGES[payload], parse_mode="Markdown")
+            label = f"{pack_amount} анализ" if pack_amount == 1 else f"{pack_amount} анализов"
+            await notify_admin_payment(label, payment.total_amount, group)
+
+        elif payload == "support":
+            log_payment(user.id, stars=payment.total_amount, payment_method="telegram_stars", notes="support")
+            record_payment("support", payment.total_amount, group)
+            await message.answer(
+                "💎 *Огромное спасибо за поддержку проекта!*\n\n"
+                "Ваш вклад помогает развивать бот и делать его лучше.\n"
+                "Мы очень ценим вашу поддержку!",
+                parse_mode="Markdown",
+            )
+            await notify_admin_payment("Поддержка", payment.total_amount, group)
+
+        elif payload == "donate":
+            log_payment(user.id, stars=payment.total_amount, payment_method="telegram_stars", notes="donate")
+            record_payment("donate", payment.total_amount, group)
+            await message.answer(
+                "❤️ *Спасибо за поддержку!*\n\n"
+                "Ваш донат очень ценен для развития бота!",
+                parse_mode="Markdown",
+            )
+            await notify_admin_payment("Донат", payment.total_amount, group)
+
+        else:
+            logger.warning(f"Неизвестный payload: {payload} от user {user.id}, stars={payment.total_amount}")
+            await notify_admin_error(
+                "Неизвестный payload в платеже",
+                f"User: {user.id}, payload: `{payload}`, stars: {payment.total_amount}"
+            )
+
+    except Exception as e:
+        logger.exception(f"CRITICAL: ошибка обработки платежа от {user.id}: {payload}, {payment.total_amount} Stars")
+        await notify_admin_error(
+            "CRITICAL — исключение в обработке платежа!",
+            f"User: {user.id} (@{user.username})\n"
+            f"Payload: {payload}, Stars: {payment.total_amount}\n"
+            f"Группа: {group}\n"
+            f"Ошибка: {type(e).__name__}: {str(e)[:300]}"
         )
-        await notify_admin_payment("1 анализ", payment.total_amount, group)
-    elif payload == "pack_3":
-        result = process_pack_payment(user.id, 3, payment.total_amount, "telegram_stars", f"pack_3_{group}")
-        logger.info(f"💰 Платеж pack_3: user={user.id}, result={result} (группа {group})")
-        record_payment("pack_3", payment.total_amount, group)
-        log_buy_click(user.id, f"paid_pack_3_{group}")
-        await message.answer(
-            "✅ *Спасибо за покупку!*\n\n"
-            "💎 На ваш баланс добавлено *3 полных анализа*.\n\n"
-            "Теперь вы получите:\n"
-            "• Облако слов + топ-15\n"
-            "• Анализ тональности\n"
-            "• Мат-облако\n"
-            "• Активность по дням/часам\n"
-            "• Личности, фразы, эмодзи\n\n"
-            "Отправьте юзернейм канала!",
-            parse_mode="Markdown",
-        )
-        await notify_admin_payment("3 анализа", payment.total_amount, group)
-    elif payload == "pack_10":
-        process_pack_payment(user.id, 10, payment.total_amount, "telegram_stars", f"pack_10_{group}")
-        record_payment("pack_10", payment.total_amount, group)
-        log_buy_click(user.id, f"paid_pack_10_{group}")
-        await message.answer(
-            "✅ *Спасибо за покупку!*\n\n"
-            "💎 На ваш баланс добавлено *10 полных анализов*.\n\n"
-            "Отправьте юзернейм канала для полного анализа!",
-            parse_mode="Markdown",
-        )
-        await notify_admin_payment("10 анализов", payment.total_amount, group)
-    elif payload == "support":
-        log_payment(user.id, stars=payment.total_amount, payment_method="telegram_stars", notes="support")
-        record_payment("support", payment.total_amount, group)
-        await message.answer(
-            "💎 *Огромное спасибо за поддержку проекта!*\n\n"
-            "Ваш вклад помогает развивать бот и делать его лучше.\n"
-            "Мы очень ценим вашу поддержку! 🙏",
-            parse_mode="Markdown",
-        )
-        await notify_admin_payment("Поддержка", payment.total_amount, group)
-    elif payload == "donate":
-        log_payment(user.id, stars=payment.total_amount, payment_method="telegram_stars", notes="donate")
-        record_payment("donate", payment.total_amount, group)
-        await message.answer(
-            "❤️ *Спасибо за поддержку!*\n\n"
-            "Ваш донат очень ценен для развития бота!",
-            parse_mode="Markdown",
-        )
-        await notify_admin_payment("Донат", payment.total_amount, group)

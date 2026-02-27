@@ -15,6 +15,9 @@ load_dotenv()
 # --- Логирование ---
 LOG_FORMAT: Final[str] = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 LOG_LEVEL: Final[int] = logging.INFO
+LOG_FILE: Final[str] = os.getenv("LOG_FILE", "bot.log")
+LOG_MAX_BYTES: Final[int] = 10 * 1024 * 1024  # 10 MB
+LOG_BACKUP_COUNT: Final[int] = 5               # 5 ротаций = 50 MB макс
 
 # --- SSL обход для macOS (ОТКЛЮЧЕНО из соображений безопасности) ---
 # ВНИМАНИЕ: Глобальное отключение SSL проверки создаёт уязвимость MITM.
@@ -159,6 +162,18 @@ FETCH_DELAY_SECONDS: Final[float] = 1.0         # Длительность па�
 PENDING_CHECK_INTERVAL: Final[int] = 30         # Проверка pending каждые 30 сек
 PENDING_BATCH_SIZE: Final[int] = 5             # Количество анализов за раз
 
+# --- HTTP / Метрики ---
+METRICS_PORT: Final[int] = 8080                  # Порт для /health и /metrics
+MAX_CONCURRENT_ANALYSES: Final[int] = 20         # Максимум параллельных анализов
+BOT_VERSION: Final[str] = "2.0.0"
+
+# --- Веб-парсинг ---
+WEB_PARSER_MAX_PAGES: Final[int] = 50            # Максимум страниц при веб-парсинге
+CACHE_DIR: Final[str] = "cache"                   # Директория дискового кэша
+
+
+# --- Sentry (опционально, DSN из .env) ---
+SENTRY_DSN: Final[str] = os.getenv("SENTRY_DSN", "")
 
 # --- Базовые оффсеты статистики (потеряны при миграции сервера 2026-02-12) ---
 STATS_OFFSET_USERS: Final[int] = 2837

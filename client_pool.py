@@ -12,7 +12,7 @@ from telethon import TelegramClient
 from telethon.errors import FloodWaitError
 
 from analyzer import analyze_channel, analyze_channel_web, AnalysisResult, AnalysisError
-from config import CACHE_TTL_LITE, CACHE_TTL_FULL
+from config import CACHE_TTL_LITE, CACHE_TTL_FULL, MAX_CONCURRENT_ANALYSES
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +147,7 @@ class ClientPool:
         self._accounts: list[ClientAccount] = []
         self._cache = AnalysisCache(max_size=cache_max_size, ttl_seconds=cache_ttl)
         self._lock = asyncio.Lock()
-        self._global_semaphore = asyncio.Semaphore(20)  # Макс 20 анализов одновременно (для высокой нагрузки)
+        self._global_semaphore = asyncio.Semaphore(MAX_CONCURRENT_ANALYSES)
 
     def add_account(self, name: str, client: TelegramClient) -> None:
         """Добавляет аккаунт в пул."""

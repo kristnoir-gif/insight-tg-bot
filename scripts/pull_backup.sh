@@ -40,7 +40,15 @@ cp "$LOCAL_BACKUPS/users_$DATE.db" "$LOCAL_BACKUPS/users_latest.db"
 
 SIZE=$(du -h "$LOCAL_BACKUPS/users_$DATE.db" | cut -f1)
 echo "Backup saved: $LOCAL_BACKUPS/users_$DATE.db ($SIZE)"
-notify_tg "✅ *Бэкап БД*: $SIZE ($DATE)"
+
+# Верификация бэкапа
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if "$SCRIPT_DIR/verify_backup.sh" "$LOCAL_BACKUPS/users_$DATE.db"; then
+    notify_tg "✅ *Бэкап БД*: $SIZE ($DATE) — верифицирован"
+else
+    notify_tg "🚨 *Бэкап БД*: $SIZE ($DATE) — верификация провалена!"
+    exit 1
+fi
 
 # Удаляем бэкапы старше 30 дней
 find "$LOCAL_BACKUPS" -name 'users_2*.db' -mtime +30 -delete

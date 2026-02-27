@@ -58,7 +58,8 @@ async def _send_example(message: types.Message) -> None:
         else:
             media.append(InputMediaPhoto(media=FSInputFile(path)))
     if media:
-        await message.answer_media_group(media=media)
+        from handlers.common import send_media_group_chunked
+        await send_media_group_chunked(message, media)
 
 
 @router.message(Command("buy"))

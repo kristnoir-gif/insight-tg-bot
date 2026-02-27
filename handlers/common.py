@@ -21,6 +21,31 @@ from db import is_admin, check_user_access
 
 logger = logging.getLogger(__name__)
 
+TELEGRAM_ALBUM_LIMIT = 10
+
+
+async def send_media_group_chunked(target, media: list, bot: "Bot | None" = None, chat_id: int | None = None) -> None:
+    """Отправляет медиагруппу, разбивая на чанки по 10 (лимит Telegram).
+
+    Одиночные фото отправляются через send_photo (media group требует 2+).
+
+    Использование:
+        await send_media_group_chunked(message, media)  # через message
+        await send_media_group_chunked(None, media, bot=bot, chat_id=user_id)  # через bot
+    """
+    for i in range(0, len(media), TELEGRAM_ALBUM_LIMIT):
+        chunk = media[i:i + TELEGRAM_ALBUM_LIMIT]
+        if len(chunk) == 1:
+            item = chunk[0]
+            if target is not None:
+                await target.answer_photo(item.media, caption=item.caption, parse_mode=item.parse_mode)
+            else:
+                await bot.send_photo(chat_id, item.media, caption=item.caption, parse_mode=item.parse_mode)
+        elif target is not None:
+            await target.answer_media_group(chunk)
+        else:
+            await bot.send_media_group(chat_id=chat_id, media=chunk)
+
 # Режим приватного доступа (только для админа)
 PRIVATE_MODE = False
 

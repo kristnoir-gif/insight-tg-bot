@@ -132,8 +132,8 @@ def _create_cloud(
             fontsize=11, ha='center', color=WATERMARK_COLOR, alpha=0.9, fontweight='bold'
         )
 
-        plt.savefig(path, dpi=DPI, facecolor='white')
-        plt.close()
+        fig.savefig(path, dpi=DPI, facecolor='white')
+        plt.close(fig)
 
         logger.info(f"Создано облако слов: {path}")
         return path
@@ -322,8 +322,8 @@ def generate_register_cloud(
             fontsize=11, ha='center', color=WATERMARK_COLOR, alpha=0.9, fontweight='bold'
         )
 
-        plt.savefig(path, dpi=DPI, facecolor='white')
-        plt.close()
+        fig.savefig(path, dpi=DPI, facecolor='white')
+        plt.close(fig)
 
         logger.info(f"Создано облако регистра: {path}")
         return path
@@ -432,9 +432,9 @@ def generate_dichotomy_cloud(
             fontsize=11, ha='center', color=WATERMARK_COLOR, alpha=0.9, fontweight='bold'
         )
 
-        plt.tight_layout(rect=[0.02, 0.08, 0.98, 0.85])
-        plt.savefig(path, dpi=DPI, facecolor='white')
-        plt.close()
+        fig.tight_layout(rect=[0.02, 0.08, 0.98, 0.85])
+        fig.savefig(path, dpi=DPI, facecolor='white')
+        plt.close(fig)
 
         logger.info(f"Создано облако дихотомии: {path}")
         return path

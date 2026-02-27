@@ -43,6 +43,7 @@ from handlers.common import (
     is_writing_review,
     set_writing_review,
     clear_writing_review,
+    send_media_group_chunked,
 )
 
 logger = logging.getLogger(__name__)
@@ -899,7 +900,7 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
             media[0].caption = caption
             media[0].parse_mode = "HTML"
 
-        await message.answer_media_group(media=media)
+        await send_media_group_chunked(message, media)
 
         # Списываем анализ только после успешной отправки
         consume_analysis(user.id, access.reason)

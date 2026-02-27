@@ -194,7 +194,8 @@ async def _send_analysis_result(bot: Bot, user_id: int, result, use_lite: bool, 
         await bot.send_message(user_id, f"Анализ {channel} завершён, но не удалось сформировать изображения.")
         return
 
-    await bot.send_media_group(chat_id=user_id, media=media)
+    from handlers.common import send_media_group_chunked
+    await send_media_group_chunked(None, media, bot=bot, chat_id=user_id)
 
     if use_lite:
         await bot.send_message(

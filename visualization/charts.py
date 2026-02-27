@@ -120,8 +120,8 @@ def generate_top_words_chart(
         _add_watermark(fig)
         _style_axes(ax)
 
-        plt.tight_layout(rect=[0.02, 0.08, 0.98, 0.92])
-        plt.savefig(path, dpi=DPI, facecolor=fig.get_facecolor())
+        fig.tight_layout(rect=[0.02, 0.08, 0.98, 0.92])
+        fig.savefig(path, dpi=DPI, facecolor=fig.get_facecolor())
         plt.close(fig)
 
         logger.info(f"Создан график топ слов: {path}")
@@ -174,8 +174,8 @@ def generate_weekday_chart(
         _add_watermark(fig)
         _style_axes(ax)
 
-        plt.tight_layout(rect=[0.02, 0.08, 0.98, 0.92])
-        plt.savefig(path, dpi=DPI, facecolor=fig.get_facecolor())
+        fig.tight_layout(rect=[0.02, 0.08, 0.98, 0.92])
+        fig.savefig(path, dpi=DPI, facecolor=fig.get_facecolor())
         plt.close(fig)
 
         logger.info(f"Создан график по дням недели: {path}")
@@ -248,8 +248,8 @@ def generate_hour_chart(
         _style_axes(ax)
         _add_watermark(fig)
 
-        plt.tight_layout(rect=[0.04, 0.12, 0.96, 0.92])
-        plt.savefig(path, dpi=160, bbox_inches='tight', facecolor=fig.get_facecolor())
+        fig.tight_layout(rect=[0.04, 0.12, 0.96, 0.92])
+        fig.savefig(path, dpi=160, bbox_inches='tight', facecolor=fig.get_facecolor())
         plt.close(fig)
 
         logger.info(f"Создан график по часам: {path}")
@@ -345,9 +345,9 @@ def generate_names_chart(
         _style_axes(ax)
         _add_watermark(fig)
 
-        plt.subplots_adjust(top=0.85)
-        plt.tight_layout(rect=[0.02, 0.07, 0.98, 0.88])
-        plt.savefig(path, dpi=160, bbox_inches='tight', facecolor=fig.get_facecolor())
+        fig.subplots_adjust(top=0.85)
+        fig.tight_layout(rect=[0.02, 0.07, 0.98, 0.88])
+        fig.savefig(path, dpi=160, bbox_inches='tight', facecolor=fig.get_facecolor())
         plt.close(fig)
 
         logger.info(f"Создан график имён: {path}")
@@ -407,9 +407,9 @@ def generate_phrases_chart(
         _add_watermark(fig)
         _style_axes(ax)
 
-        plt.subplots_adjust(top=0.85)
-        plt.tight_layout(rect=[0.02, 0.08, 0.98, 0.88])
-        plt.savefig(path, dpi=DPI, facecolor=fig.get_facecolor())
+        fig.subplots_adjust(top=0.85)
+        fig.tight_layout(rect=[0.02, 0.08, 0.98, 0.88])
+        fig.savefig(path, dpi=DPI, facecolor=fig.get_facecolor())
         plt.close(fig)
 
         logger.info(f"Создан график фраз: {path}")
@@ -477,8 +477,8 @@ def generate_heatmap_chart(
         fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
         _add_watermark(fig, y=0.02)
 
-        plt.tight_layout(rect=[0.02, 0.08, 0.95, 0.92])
-        plt.savefig(path, dpi=DPI, bbox_inches='tight', facecolor=fig.get_facecolor())
+        fig.tight_layout(rect=[0.02, 0.08, 0.95, 0.92])
+        fig.savefig(path, dpi=DPI, bbox_inches='tight', facecolor=fig.get_facecolor())
         plt.close(fig)
 
         logger.info(f"Создана тепловая карта: {path}")
@@ -564,8 +564,8 @@ def generate_comparison_chart(
 
         _add_watermark(fig, y=0.02)
 
-        plt.tight_layout(rect=[0.02, 0.08, 0.98, 0.92])
-        plt.savefig(path, dpi=DPI, bbox_inches='tight', facecolor=fig.get_facecolor())
+        fig.tight_layout(rect=[0.02, 0.08, 0.98, 0.92])
+        fig.savefig(path, dpi=DPI, bbox_inches='tight', facecolor=fig.get_facecolor())
         plt.close(fig)
 
         logger.info(f"Создана радарная диаграмма сравнения: {path}")

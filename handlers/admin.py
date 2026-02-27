@@ -611,7 +611,8 @@ async def cmd_stats(message: types.Message) -> None:
                 caption = "📊 Статистика бота" if i == 0 else None
                 media.append(InputMediaPhoto(media=FSInputFile(path), caption=caption))
 
-            await message.answer_media_group(media=media)
+            from handlers.common import send_media_group_chunked
+            await send_media_group_chunked(message, media)
 
             # Удаляем временные файлы
             for path in chart_paths:

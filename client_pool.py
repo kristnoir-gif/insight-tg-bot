@@ -239,6 +239,7 @@ class ClientPool:
         # 3. Пытаемся выполнить анализ (семафор ограничивает макс 2 одновременных анализа)
         async with self._global_semaphore:
             tried_accounts: set[str] = set()
+            channel_not_found = False
 
             while account and account.name not in tried_accounts:
                 tried_accounts.add(account.name)
@@ -300,6 +301,7 @@ class ClientPool:
                     elif "не найден" in error_str or "no user has" in error_str:
                         # Канал не найден через API — попробуем веб-фоллбэк
                         logger.warning(f"Channel {channel} not found via API on {account.name}, will try web fallback")
+                        channel_not_found = True
                         break  # Выходим из while — дальше сработает веб-фоллбэк
                     else:
                         # Другая ошибка — не пробуем другие аккаунты
@@ -329,6 +331,10 @@ class ClientPool:
                     except Exception as e:
                         logger.warning(f"Web fallback failed for {channel_str}: {e}")
                         return None, f"web_fallback_failed:{channel_str}:{str(e)[:100]}"
+
+            # Канал не найден ни через API, ни через веб — не ретраить
+            if channel_not_found:
+                return None, "channel_not_found"
 
             if self._accounts:
                 min_cooldown = min(acc.cooldown_remaining for acc in self._accounts)

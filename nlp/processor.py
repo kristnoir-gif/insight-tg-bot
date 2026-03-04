@@ -31,6 +31,7 @@ from nltk.util import ngrams
 from nlp.constants import (
     russian_stopwords,
     OBSCENE_ROOTS,
+    OBSCENE_FALSE_POSITIVES,
     PERSON_BLACKLIST,
     PHRASE_STOPWORDS,
 )
@@ -196,7 +197,9 @@ def get_clean_words(text: str, mode: ProcessingMode = 'normal') -> list[str]:
                 clean_words.append(normal)
 
         elif mode == 'mats':
-            if any(root in normal for root in OBSCENE_ROOTS):
+            check = normal.replace('ё', 'е')
+            if (normal not in OBSCENE_FALSE_POSITIVES
+                    and any(root in check for root in OBSCENE_ROOTS)):
                 clean_words.append(normal)
 
     return clean_words

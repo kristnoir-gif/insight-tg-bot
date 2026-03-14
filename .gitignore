@@ -2,7 +2,7 @@
 .env
 *.env
 
-# Деплой скрипт (содержит данные сервера)
+# Deploy script (contains server credentials)
 deploy.sh
 
 # Python
@@ -30,17 +30,18 @@ env/
 *.session
 *.session-journal
 
-# Логи и временные файлы
+# Logs & temp
 *.log
 *.tmp
 
-# Кэш анализов
+# Analysis cache
 cache/
 
-# Generated images
+# Generated images (keep example/)
 *.png
+!example/*.png
 
-# Сгенерированные файлы
+# Generated files
 presentation.html
 
 # IDE
@@ -52,7 +53,7 @@ presentation.html
 # macOS
 .DS_Store
 
-# Данные/экспорты
+# Data/exports
 channel_stats.*
 tdata/
 
@@ -60,4 +61,16 @@ tdata/
 dist/
 build/
 *.egg-info/
+
+# Archive (rejected approaches)
 _archive/
+
+# Claude Code (local AI assistant config)
+CLAUDE.md
+.claude/
+
+# Internal docs & scripts
+docs/
+scripts/
+backups/
+generate_cache.py

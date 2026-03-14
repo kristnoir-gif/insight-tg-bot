@@ -1,247 +1,175 @@
-# Telegram Channel Analytics Bot
+# Insight TG Bot
 
-Бот для анализа текстового контента публичных Telegram-каналов с генерацией визуальных отчётов.
+**[Русская версия](README.ru.md)**
 
-## Возможности
+Telegram bot for analyzing public channels — word clouds, sentiment, activity heatmaps, personality mentions, phrases, emoji stats, and more.
 
-- **Облако смыслов** — визуализация ключевых слов канала
-- **Топ-15 слов** — график частотности слов
-- **Облако мата** — анализ ненормативной лексики
-- **Позитивные/негативные слова** — облака по настроению
-- **Статистика по дням недели** — средняя длина постов
-- **Статистика по часам** — время публикаций
-- **Топ имён** — упомянутые люди и личности
-- **Топ фраз** — частые триграммы (3-словные фразы)
-- **Топ эмодзи** — частые эмодзи в постах
+Try it: [@insight_tg_bot](https://t.me/insight_tg_bot)
 
-## Структура проекта
+## Example Output
+
+<p align="center">
+  <img src="example/cloud.png" width="400" alt="Word Cloud">
+  <img src="example/graph.png" width="400" alt="Top Words">
+</p>
+<p align="center">
+  <img src="example/positive.png" width="400" alt="Positive Words">
+  <img src="example/mats.png" width="400" alt="Profanity Cloud">
+</p>
+<p align="center">
+  <img src="example/hour.png" width="400" alt="Hourly Activity">
+  <img src="example/weekday.png" width="400" alt="Weekday Stats">
+</p>
+<p align="center">
+  <img src="example/heatmap.png" width="400" alt="Activity Heatmap">
+  <img src="example/aggressive.png" width="400" alt="Aggressive Words">
+</p>
+<p align="center">
+  <img src="example/names.png" width="400" alt="Top Names">
+  <img src="example/phrases.png" width="400" alt="Top Phrases">
+</p>
+<p align="center">
+  <img src="example/register.png" width="400" alt="Register Analysis">
+  <img src="example/dichotomy.png" width="400" alt="Dichotomy">
+</p>
+
+## Features
+
+- **Word Cloud** — key topics visualization
+- **Top 15 Words** — word frequency chart
+- **Profanity Cloud** — profanity analysis with false positive filtering
+- **Sentiment Clouds** — positive & negative word clouds
+- **Weekday Stats** — average post length by day
+- **Hourly Activity** — posting time distribution
+- **Activity Heatmap** — hour × weekday heatmap
+- **Top Names** — mentioned people (NER via Natasha)
+- **Top Phrases** — frequent trigrams
+- **Top Emoji** — most used emoji
+- **Register Analysis** — CAPS vs lowercase ratio
+- **Dichotomy Chart** — formal vs informal, long vs short, etc.
+- **PDF Export** — full report as PDF
+
+### Two Modes
+
+| | Lite (free) | Full (paid) |
+|---|---|---|
+| Method | Web scraping | Telethon API |
+| Charts | Word cloud only | All 12 charts |
+| Posts | Up to 50 | Up to 500 |
+| Speed | ~10 sec | ~30 sec |
+
+### Monetization
+
+Payments via **Telegram Stars** with A/B price testing (2 groups).
+
+## Tech Stack
+
+| Component | Library |
+|---|---|
+| Bot framework | aiogram 3.x |
+| Telegram client | Telethon (pool of 3 accounts) |
+| NLP | pymorphy3, Natasha NER, NLTK |
+| Visualization | matplotlib, wordcloud |
+| Database | SQLite (WAL mode) |
+| Monitoring | Prometheus, Sentry |
+| PDF | matplotlib PdfPages |
+
+## Architecture
 
 ```
-bot_tg/
-├── config.py              # Конфигурация из .env
-├── nlp/
-│   ├── __init__.py
-│   ├── constants.py       # Стоп-слова, словари настроений
-│   └── processor.py       # Обработка текста, лемматизация
-├── visualization/
-│   ├── __init__.py
-│   ├── wordclouds.py      # Генерация облаков слов
-│   └── charts.py          # Генерация графиков
-├── analyzer.py            # Логика анализа каналов
-├── handlers.py            # Обработчики команд бота
-├── main.py                # Точка входа
-├── .env                   # Секреты (не в git)
-├── .env.example           # Шаблон для .env
-└── README.md
+main.py              — entry point, background tasks
+config.py            — settings from .env
+db.py                — SQLite: users, payments, pending queue
+analyzer.py          — analysis pipeline (Telethon + web scraping)
+client_pool.py       — 3 Telethon accounts, rotation, cooldown, cache
+handlers/
+  ├── common.py      — rate limiting, keyboards, A/B test
+  ├── user.py        — /start, /help, channel analysis
+  ├── payments.py    — Telegram Stars payments
+  └── admin.py       — /admin, /broadcast, /stats
+nlp/
+  ├── processor.py   — lemmatization (pymorphy3) + NER (Natasha)
+  └── constants.py   — stop words, sentiment dictionaries
+visualization/
+  ├── charts.py      — 12 chart types (thread-safe, OOP API)
+  ├── wordclouds.py  — word clouds
+  └── pdf_export.py  — PDF report generation
 ```
 
-## Технологический стек
+## Setup
 
-| Компонент | Библиотека |
-|-----------|------------|
-| Telegram Bot API | aiogram 3.x |
-| Telegram Client | telethon |
-| NLP (русский) | pymorphy2, nltk |
-| Визуализация | matplotlib, wordcloud |
-| Эмодзи | emoji |
-| Конфигурация | python-dotenv |
+### 1. Clone & install
 
-## Установка
-
-### 1. Клонирование
 ```bash
-git clone <repo-url>
-cd bot_tg
+git clone https://github.com/kristnoir-gif/insight-tg-bot.git
+cd insight-tg-bot
+pip install -r requirements.txt
+python -c "import nltk; nltk.download('punkt'); nltk.download('punkt_tab'); nltk.download('stopwords')"
 ```
 
-### 2. Зависимости
-```bash
-pip install aiogram telethon pymorphy2 nltk matplotlib wordcloud numpy emoji python-dotenv
-```
+### 2. Configure
 
-### 3. Настройка окружения
 ```bash
 cp .env.example .env
 ```
 
-Отредактируйте `.env`:
+Edit `.env`:
+
 ```env
 API_ID=your_api_id          # https://my.telegram.org/apps
 API_HASH=your_api_hash
-BOT_TOKEN=your_bot_token    # от @BotFather
+BOT_TOKEN=your_bot_token    # from @BotFather
 SESSION_NAME=user_session
 ```
 
-### 4. Первый запуск
+### 3. Create Telethon session
+
+On first run, Telethon will ask for phone number and auth code:
+
 ```bash
 python3 main.py
 ```
 
-При первом запуске Telethon запросит авторизацию (номер телефона и код из Telegram).
+### 4. Run
 
-## Использование
-
-1. Найдите бота в Telegram: `@insight_tg_bot`
-2. Отправьте `/start`
-3. Отправьте юзернейм канала (например: `polozhnyak`)
-4. Получите визуальный отчёт
-
-## Тестирование
-
-### Проверка импортов
 ```bash
-python3 -c "
-from config import API_ID, BOT_TOKEN
-from nlp.processor import get_clean_words, extract_emojis
-from visualization.wordclouds import generate_main_cloud
-from visualization.charts import generate_top_words_chart
-from analyzer import analyze_channel
-from handlers import router
-print('Все импорты OK')
-"
-```
-
-### Тест NLP
-```bash
-python3 -c "
-from nlp.processor import get_clean_words, extract_emojis
-
-text = 'Привет! Это тестовое сообщение о Python. Москва красивый город!'
-words = get_clean_words(text, 'normal')
-print(f'Слова: {words}')
-
-emojis = extract_emojis('Привет! 🔥💪😊')
-print(f'Эмодзи: {emojis}')
-"
-```
-
-### Тест визуализации
-```bash
-python3 -c "
-from collections import Counter
-from visualization.wordclouds import generate_main_cloud
-from visualization.charts import generate_top_words_chart
-import os
-
-words = ['тест', 'код', 'python', 'тест', 'код', 'данные']
-cloud = generate_main_cloud('test', words, 'Тест')
-print(f'Облако: {cloud}')
-
-graph = generate_top_words_chart('test', Counter(words), 'Тест', top_n=3)
-print(f'График: {graph}')
-
-# Очистка
-for f in ['cloud_test.png', 'graph_test.png']:
-    if os.path.exists(f): os.remove(f)
-print('Тестовые файлы удалены')
-"
-```
-
-### Запуск бота (фоновый режим)
-```bash
-nohup python3 main.py > /tmp/bot_log.txt 2>&1 &
-echo $! > /tmp/bot_pid.txt
-```
-
-### Мониторинг
-```bash
-# Логи в реальном времени
-tail -f /tmp/bot_log.txt
-
-# Статус процесса
-ps -p $(cat /tmp/bot_pid.txt) -o pid,stat,etime
-
-# Остановка
-kill $(cat /tmp/bot_pid.txt)
-```
-
-## API
-
-### NLP Processor
-
-```python
-from nlp.processor import get_clean_words, extract_emojis
-
-# Режимы обработки:
-# 'normal' - существительные и прилагательные
-# 'mats' - ненормативная лексика
-# 'person' - имена собственные
-
-words = get_clean_words(text, mode='normal')
-emojis = extract_emojis(text)
-```
-
-### Analyzer
-
-```python
-from analyzer import analyze_channel, AnalysisResult
-
-result: AnalysisResult = await analyze_channel(client, 'channel_name', limit=500)
-
-# Результат содержит:
-# - result.title - название канала
-# - result.stats.unique_count - уникальные слова
-# - result.stats.avg_len - средняя длина поста
-# - result.stats.scream_index - индекс "крика"
-# - result.cloud_path, result.graph_path, ... - пути к изображениям
-# - result.top_emojis - топ эмодзи
-```
-
-### Visualization
-
-```python
-from visualization.wordclouds import generate_main_cloud, generate_sentiment_cloud
-from visualization.charts import generate_top_words_chart, generate_hour_chart
-
-# Все функции возвращают путь к PNG файлу или None
-path = generate_main_cloud(username, words, title)
-path = generate_sentiment_cloud(username, words, title, sentiment='positive')
-path = generate_top_words_chart(username, counter, title, top_n=15)
-```
-
-## Конфигурация
-
-Все настройки в `config.py`:
-
-| Параметр | Описание | По умолчанию |
-|----------|----------|--------------|
-| `API_ID` | Telegram API ID | из .env |
-| `API_HASH` | Telegram API Hash | из .env |
-| `BOT_TOKEN` | Токен бота | из .env |
-| `SESSION_NAME` | Имя файла сессии | user_session |
-| `MOSCOW_TZ` | Временная зона | UTC+3 |
-| `DPI` | Качество изображений | 150 |
-| `MAX_WORDS_CLOUD` | Макс. слов в облаке | 200 |
-| `DEFAULT_MESSAGE_LIMIT` | Лимит сообщений | 500 |
-
-## Логирование
-
-Бот использует стандартный Python logging:
-
-```
-2026-01-12 21:26:19 | INFO | __main__ | Бот успешно запущен
-2026-01-12 21:26:19 | INFO | analyzer | Начат анализ канала: polozhnyak
-2026-01-12 21:26:19 | INFO | visualization.wordclouds | Создано облако слов: cloud_polozhnyak.png
-```
-
-## Известные проблемы
-
-### database is locked
-Если файл сессии заблокирован:
-```bash
-pkill -9 -f python
-rm -f *.session-journal
 python3 main.py
 ```
 
-### Conflict: terminated by other getUpdates
-Другой экземпляр бота уже запущен. Остановите его и подождите 30 секунд:
+Health check: `http://localhost:8080/health`
+
+## Testing
+
 ```bash
-pkill -f "python3 main.py"
-sleep 30
-python3 main.py
+pip install pytest
+python3 -m pytest tests/ -x -q
 ```
 
-## Лицензия
+CI runs on Python 3.11 and 3.12 via GitHub Actions.
+
+## Deployment
+
+The bot runs as a systemd service. Example unit file included: `tg-bot.service`.
+
+```bash
+# Copy to server
+rsync -avz --exclude-from='.gitignore' . server:/opt/bot_tg/
+
+# Enable service
+sudo cp tg-bot.service /etc/systemd/system/
+sudo systemctl enable --now tg-bot
+```
+
+> **Note:** Requires `fonts-dejavu-core` on the server for matplotlib charts.
+
+## Key Design Decisions
+
+- **Account pool** — 3 Telethon accounts with automatic rotation on FloodWait, priority queue for pending analyses
+- **Two-level cache** — in-memory + disk (`cache/` directory) to minimize API calls
+- **Thread-safe charts** — matplotlib OOP API only (`fig.savefig()`, never `plt.savefig()`) to avoid race conditions in async workers
+- **Atomic payments** — single transaction for balance update + payment record, admin notification on failure
+- **NLP lazy loading** — pymorphy3/Natasha models (~2s) loaded on first use, not at import time
+
+## License
 
 MIT

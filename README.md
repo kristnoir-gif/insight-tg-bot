@@ -55,7 +55,7 @@ Try it: [@insight_tg_bot](https://t.me/insight_tg_bot)
 |---|---|---|
 | Method | Web scraping | Telethon API |
 | Charts | Word cloud only | All 12 charts |
-| Posts | Up to 50 | Up to 500 |
+| Posts | Up to 150 | Up to 500 |
 | Speed | ~10 sec | ~30 sec |
 
 ### Monetization

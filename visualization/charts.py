@@ -1,7 +1,6 @@
 """
 Генерация графиков и диаграмм.
 """
-import re
 import logging
 from collections import Counter
 
@@ -12,42 +11,9 @@ import matplotlib.cm as cm
 import numpy as np
 
 from config import DPI, BACKGROUND_COLOR, WATERMARK_TEXT, WATERMARK_COLOR
+from visualization.utils import clean_title as _clean_title
 
 logger = logging.getLogger(__name__)
-
-
-def _clean_title(title: str, max_line_length: int = 25) -> str:
-    """
-    Очищает название канала и разбивает на 2 строки если слишком длинное.
-
-    Args:
-        title: Название канала.
-        max_line_length: Максимальная длина строки (по умолчанию 25 символов).
-
-    Returns:
-        Очищенное название (с переносом если длинное).
-    """
-    cleaned = re.sub(r'[^\w\s-]', '', title).strip()
-
-    if len(cleaned) <= max_line_length:
-        return cleaned
-
-    # Разбиваем на 2 строки по словам
-    words = cleaned.split()
-    line1 = []
-    line2 = []
-    current_len = 0
-
-    for word in words:
-        if current_len + len(word) + 1 <= max_line_length:
-            line1.append(word)
-            current_len += len(word) + 1
-        else:
-            line2.append(word)
-
-    if line2:
-        return ' '.join(line1) + '\n' + ' '.join(line2)
-    return ' '.join(line1)
 
 
 def _setup_figure(figsize: tuple[int, int] = (12, 7)) -> tuple[plt.Figure, plt.Axes]:

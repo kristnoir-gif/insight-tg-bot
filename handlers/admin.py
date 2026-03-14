@@ -453,10 +453,10 @@ async def cmd_stats(message: types.Message) -> None:
                 ax1.xaxis.set_major_formatter(mdates.DateFormatter('%d.%m'))
                 ax1.xaxis.set_major_locator(mdates.DayLocator(interval=3))
                 fig.autofmt_xdate()
-                plt.title('Пользователи (30 дней)', fontweight='bold', pad=15)
+                ax1.set_title('Пользователи (30 дней)', fontweight='bold', pad=15)
                 fig.tight_layout()
 
-                p = tempfile.mktemp(suffix='_users.png')
+                p = tempfile.NamedTemporaryFile(suffix='_users.png', delete=False).name
                 fig.savefig(p, dpi=150, facecolor='white')
                 plt.close(fig)
                 chart_paths.append(p)
@@ -480,10 +480,10 @@ async def cmd_stats(message: types.Message) -> None:
                 ax.xaxis.set_major_locator(mdates.DayLocator(interval=3))
                 fig.autofmt_xdate()
                 ax.set_ylabel('Анализов')
-                plt.title('Анализы по дням (30 дней)', fontweight='bold', pad=15)
+                ax.set_title('Анализы по дням (30 дней)', fontweight='bold', pad=15)
                 fig.tight_layout()
 
-                p = tempfile.mktemp(suffix='_analyses.png')
+                p = tempfile.NamedTemporaryFile(suffix='_analyses.png', delete=False).name
                 fig.savefig(p, dpi=150, facecolor='white')
                 plt.close(fig)
                 chart_paths.append(p)
@@ -523,34 +523,33 @@ async def cmd_stats(message: types.Message) -> None:
 
                 cursor.execute("SELECT SUM(stars) FROM payments WHERE status = 'completed'")
                 total_all_stars = cursor.fetchone()[0] or 0
-                plt.title(f'Выручка (30 дней) — всего за всё время: {total_all_stars}⭐', fontweight='bold', pad=15)
+                ax1.set_title(f'Выручка (30 дней) — всего за всё время: {total_all_stars}⭐', fontweight='bold', pad=15)
                 fig.tight_layout()
 
-                p = tempfile.mktemp(suffix='_revenue.png')
+                p = tempfile.NamedTemporaryFile(suffix='_revenue.png', delete=False).name
                 fig.savefig(p, dpi=150, facecolor='white')
                 plt.close(fig)
                 chart_paths.append(p)
 
-            # === 4. A/B/C тест воронки ===
+            # === 4. A/B тест воронки ===
             funnel = get_buy_funnel()
             if funnel:
-                groups = {'a': {}, 'b': {}, 'c': {}}
+                groups = {'a': {}, 'b': {}}
                 for action, data in funnel.items():
-                    for g in ('a', 'b', 'c'):
+                    for g in ('a', 'b'):
                         if action.endswith(f'_{g}'):
                             groups[g][action.replace(f'_{g}', '')] = data
 
                 stages = ['open_menu', 'pack_1', 'pack_3', 'pack_10', 'paid_total']
                 labels = ['Открыли меню', '1 анализ', '3 анализа', '10 анализов', 'Оплатили']
 
-                for g in ('a', 'b', 'c'):
+                for g in ('a', 'b'):
                     paid_total_clicks = sum(groups[g].get(f'paid_pack_{p}', {}).get('clicks', 0) for p in ('1', '3', '10'))
                     paid_total_users = sum(groups[g].get(f'paid_pack_{p}', {}).get('users', 0) for p in ('1', '3', '10'))
                     groups[g]['paid_total'] = {'clicks': paid_total_clicks, 'users': paid_total_users}
 
                 a_clicks = [groups['a'].get(s, {}).get('clicks', 0) for s in stages]
                 b_clicks = [groups['b'].get(s, {}).get('clicks', 0) for s in stages]
-                c_clicks = [groups['c'].get(s, {}).get('clicks', 0) for s in stages]
 
                 # Платежи по группам
                 cursor.execute("""
@@ -562,18 +561,15 @@ async def cmd_stats(message: types.Message) -> None:
                 pay_rows = cursor.fetchall()
                 a_paid = sum(r[1] for r in pay_rows if r[0] and '_a' in r[0])
                 b_paid = sum(r[1] for r in pay_rows if r[0] and '_b' in r[0])
-                c_paid = sum(r[1] for r in pay_rows if r[0] and '_c' in r[0])
                 a_stars = sum(r[2] for r in pay_rows if r[0] and '_a' in r[0])
                 b_stars = sum(r[2] for r in pay_rows if r[0] and '_b' in r[0])
-                c_stars = sum(r[2] for r in pay_rows if r[0] and '_c' in r[0])
 
                 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
                 x = range(len(labels))
-                w = 0.25
-                ax1.bar([i - w for i in x], a_clicks, w, color='#74b9ff', label='A (10⭐)')
-                ax1.bar(list(x), b_clicks, w, color='#fdcb6e', label='B (20⭐)')
-                ax1.bar([i + w for i in x], c_clicks, w, color='#ff7675', label='C (50⭐)')
+                w = 0.3
+                ax1.bar([i - w/2 for i in x], a_clicks, w, color='#74b9ff', label='A (дешёвая)')
+                ax1.bar([i + w/2 for i in x], b_clicks, w, color='#fdcb6e', label='B (дорогая)')
                 ax1.set_xticks(x)
                 ax1.set_xticklabels(labels, rotation=15)
                 ax1.set_ylabel('Клики')
@@ -583,20 +579,18 @@ async def cmd_stats(message: types.Message) -> None:
                 bar_labels = ['Покупок', 'Звёзд ⭐']
                 a_vals = [a_paid, a_stars]
                 b_vals = [b_paid, b_stars]
-                c_vals = [c_paid, c_stars]
                 x2 = range(len(bar_labels))
-                ax2.bar([i - w for i in x2], a_vals, w, color='#74b9ff', label=f'A ({a_paid} покупок, {a_stars}⭐)')
-                ax2.bar(list(x2), b_vals, w, color='#fdcb6e', label=f'B ({b_paid} покупок, {b_stars}⭐)')
-                ax2.bar([i + w for i in x2], c_vals, w, color='#ff7675', label=f'C ({c_paid} покупок, {c_stars}⭐)')
+                ax2.bar([i - w/2 for i in x2], a_vals, w, color='#74b9ff', label=f'A ({a_paid} покупок, {a_stars}⭐)')
+                ax2.bar([i + w/2 for i in x2], b_vals, w, color='#fdcb6e', label=f'B ({b_paid} покупок, {b_stars}⭐)')
                 ax2.set_xticks(x2)
                 ax2.set_xticklabels(bar_labels)
                 ax2.legend()
-                ax2.set_title('A/B/C тест: результат')
+                ax2.set_title('A/B тест: результат')
 
-                fig.suptitle('A/B/C тест цен', fontweight='bold', fontsize=14)
+                fig.suptitle('A/B тест цен', fontweight='bold', fontsize=14)
                 fig.tight_layout()
 
-                p = tempfile.mktemp(suffix='_ab_test.png')
+                p = tempfile.NamedTemporaryFile(suffix='_ab_test.png', delete=False).name
                 fig.savefig(p, dpi=150, facecolor='white')
                 plt.close(fig)
                 chart_paths.append(p)

@@ -4,7 +4,8 @@ After=network.target
 
 [Service]
 Type=notify
-User=root
+User=tg-bot
+Group=tg-bot
 WorkingDirectory=/opt/bot_tg
 ExecStart=/usr/bin/python3 /opt/bot_tg/main.py
 Restart=always

@@ -19,16 +19,6 @@ LOG_FILE: Final[str] = os.getenv("LOG_FILE", "bot.log")
 LOG_MAX_BYTES: Final[int] = 10 * 1024 * 1024  # 10 MB
 LOG_BACKUP_COUNT: Final[int] = 5               # 5 ротаций = 50 MB макс
 
-# --- SSL обход для macOS (ОТКЛЮЧЕНО из соображений безопасности) ---
-# ВНИМАНИЕ: Глобальное отключение SSL проверки создаёт уязвимость MITM.
-# Если нужен обход для конкретных запросов, используйте локальный контекст.
-# try:
-#     _create_unverified_https_context = ssl._create_unverified_context
-# except AttributeError:
-#     pass
-# else:
-#     ssl._create_default_https_context = _create_unverified_https_context
-
 # --- Telegram API ---
 API_ID: Final[int] = int(os.getenv("API_ID", "0"))
 API_HASH: Final[str] = os.getenv("API_HASH", "")

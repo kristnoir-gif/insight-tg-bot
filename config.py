@@ -162,6 +162,13 @@ WEB_PARSER_MAX_PAGES: Final[int] = 50            # Максимум страни
 CACHE_DIR: Final[str] = "cache"                   # Директория дискового кэша
 
 
+# --- LLM (Alibaba DashScope / Qwen) ---
+DASHSCOPE_API_KEY: Final[str] = os.getenv("DASHSCOPE_API_KEY", "")
+LLM_MODEL: Final[str] = os.getenv("LLM_MODEL", "qwen-plus")
+LLM_BASE_URL: Final[str] = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+LLM_MAX_TOKENS: Final[int] = 4000  # Макс длина ответа
+LLM_TIMEOUT: Final[int] = 120      # Таймаут запроса к LLM (секунды)
+
 # --- Sentry (опционально, DSN из .env) ---
 SENTRY_DSN: Final[str] = os.getenv("SENTRY_DSN", "")
 

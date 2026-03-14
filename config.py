@@ -181,9 +181,9 @@ STATS_OFFSET_ANALYSES: Final[int] = 2130
 STATS_OFFSET_STARS: Final[int] = 1734
 
 # --- Администраторы ---
-_admin_ids_str = os.getenv("ADMIN_IDS", "26643106,6856259901")
+_admin_ids_str = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS: Final[set[int]] = set(int(x.strip()) for x in _admin_ids_str.split(",") if x.strip())
-ADMIN_ID: Final[int] = int(os.getenv("ADMIN_ID", "26643106"))
+ADMIN_ID: Final[int] = int(os.getenv("ADMIN_ID", "0"))
 
 
 def validate_config() -> bool:

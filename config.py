@@ -127,9 +127,9 @@ MOSCOW_TZ: Final[timezone] = timezone(timedelta(hours=3))
 DPI: Final[int] = 150
 MAX_WORDS_CLOUD: Final[int] = 200
 MAX_WORDS_SENTIMENT: Final[int] = 100
-CLOUD_WIDTH: Final[int] = 1000
-CLOUD_HEIGHT: Final[int] = 600
-FIGURE_SIZE: Final[tuple[int, int]] = (12, 7)
+CLOUD_WIDTH: Final[int] = 900
+CLOUD_HEIGHT: Final[int] = 1400
+FIGURE_SIZE: Final[tuple[float, float]] = (7.2, 12.8)  # 1080×1920 stories format (9:16)
 BACKGROUND_COLOR: Final[str] = "#f8f9fa"
 WATERMARK_TEXT: Final[str] = "Создано с помощью бота @insight_tg_bot"
 WATERMARK_COLOR: Final[str] = "#752E53"
@@ -142,15 +142,16 @@ ADMIN_MESSAGE_LIMIT: Final[int] = 800    # Расширенный анализ (
 
 # --- Тайминги и кэш ---
 RATE_LIMIT_SECONDS: Final[int] = 120            # Между запросами пользователя (снижено для высокой нагрузки)
+RATE_LIMIT_NEW_USER_SECONDS: Final[int] = 300   # Рейт-лимит для новых юзеров (< 1 анализа) — 5 мин
 FLOODWAIT_PENALTY_SECONDS: Final[int] = 3600    # После FloodWait для пользователя
-CACHE_TTL_LITE: Final[int] = 1800               # In-memory кэш lite (30 мин)
-CACHE_TTL_FULL: Final[int] = 7200               # In-memory кэш full (2 часа)
-DISK_CACHE_TTL: Final[int] = 43200              # Дисковый кэш (12 часов)
-DISK_CACHE_TTL_LITE: Final[int] = 86400         # Дисковый кэш lite (24 часа)
+CACHE_TTL_LITE: Final[int] = 3600               # In-memory кэш lite (1 час)
+CACHE_TTL_FULL: Final[int] = 14400              # In-memory кэш full (4 часа)
+DISK_CACHE_TTL: Final[int] = 86400              # Дисковый кэш (24 часа)
+DISK_CACHE_TTL_LITE: Final[int] = 172800        # Дисковый кэш lite (48 часов)
 FETCH_DELAY_EVERY_N: Final[int] = 100           # Пауза каждые N сообщений
 FETCH_DELAY_SECONDS: Final[float] = 1.0         # Длительность паузы
-PENDING_CHECK_INTERVAL: Final[int] = 30         # Проверка pending каждые 30 сек
-PENDING_BATCH_SIZE: Final[int] = 5             # Количество анализов за раз
+PENDING_CHECK_INTERVAL: Final[int] = 15         # Проверка pending каждые 15 сек
+PENDING_BATCH_SIZE: Final[int] = 10             # Количество анализов за раз
 
 # --- HTTP / Метрики ---
 METRICS_PORT: Final[int] = 8080                  # Порт для /health и /metrics
@@ -162,10 +163,10 @@ WEB_PARSER_MAX_PAGES: Final[int] = 50            # Максимум страни
 CACHE_DIR: Final[str] = "cache"                   # Директория дискового кэша
 
 
-# --- LLM (Alibaba DashScope / Qwen) ---
-DASHSCOPE_API_KEY: Final[str] = os.getenv("DASHSCOPE_API_KEY", "")
-LLM_MODEL: Final[str] = os.getenv("LLM_MODEL", "qwen-plus")
-LLM_BASE_URL: Final[str] = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+# --- LLM (OpenAI-совместимый API: Groq, Alibaba DashScope, OpenRouter и др.) ---
+LLM_API_KEY: Final[str] = os.getenv("LLM_API_KEY", os.getenv("DASHSCOPE_API_KEY", ""))
+LLM_MODEL: Final[str] = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
+LLM_BASE_URL: Final[str] = os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1")
 LLM_MAX_TOKENS: Final[int] = 4000  # Макс длина ответа
 LLM_TIMEOUT: Final[int] = 120      # Таймаут запроса к LLM (секунды)
 

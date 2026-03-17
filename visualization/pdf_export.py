@@ -48,7 +48,7 @@ def generate_pdf_report(
 
         with PdfPages(output_path) as pdf:
             # Титульная страница
-            fig = plt.figure(figsize=(11.69, 8.27))  # A4 landscape
+            fig = plt.figure(figsize=(8.27, 11.69))  # A4 portrait
             fig.patch.set_facecolor('#f8f9fa')
 
             fig.text(0.5, 0.65, f"Анализ канала", fontsize=16, ha='center',
@@ -76,7 +76,7 @@ def generate_pdf_report(
 
             # Страницы с графиками
             for img_path in existing_images:
-                fig = plt.figure(figsize=(11.69, 8.27))
+                fig = plt.figure(figsize=(8.27, 11.69))
                 fig.patch.set_facecolor('#f8f9fa')
                 try:
                     img = plt.imread(img_path)

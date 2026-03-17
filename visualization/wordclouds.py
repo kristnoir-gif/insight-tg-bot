@@ -1,5 +1,6 @@
 """
 Генерация облаков слов.
+Все графики в вертикальном формате 9:16 (1080×1920) для Stories.
 """
 import logging
 from typing import Literal, Callable
@@ -13,6 +14,7 @@ from wordcloud import WordCloud
 
 from config import (
     DPI,
+    FIGURE_SIZE,
     MAX_WORDS_CLOUD,
     MAX_WORDS_SENTIMENT,
     CLOUD_WIDTH,
@@ -57,7 +59,7 @@ def _create_cloud(
     max_words: int = MAX_WORDS_SENTIMENT,
 ) -> str | None:
     """
-    Базовая функция создания облака слов.
+    Базовая функция создания облака слов (вертикальный формат).
 
     Args:
         words: Список слов.
@@ -86,17 +88,17 @@ def _create_cloud(
             prefer_horizontal=True,
         ).generate(" ".join(words))
 
-        fig = plt.figure(figsize=(12, 7), facecolor='white')
-        ax = fig.add_axes([0.0, 0.08, 1.0, 0.82])
+        fig = plt.figure(figsize=FIGURE_SIZE, facecolor='white')
+        ax = fig.add_axes([0.02, 0.05, 0.96, 0.85])
         ax.imshow(wc.to_image(), interpolation='bilinear')
         ax.axis("off")
 
         fig.text(
-            0.5, 0.94, title_text,
-            fontsize=22, fontweight='bold', ha='center', va='center', color='#2d3436'
+            0.5, 0.95, title_text,
+            fontsize=20, fontweight='bold', ha='center', va='center', color='#2d3436'
         )
         fig.text(
-            0.5, 0.03, WATERMARK_TEXT,
+            0.5, 0.02, WATERMARK_TEXT,
             fontsize=11, ha='center', color=WATERMARK_COLOR, alpha=0.9, fontweight='bold'
         )
 
@@ -128,7 +130,7 @@ def generate_main_cloud(username: str, words: list[str], title: str) -> str | No
     return _create_cloud(
         words=words,
         path=path,
-        title_text=f"Облако смыслов канала: {clean_title}",
+        title_text=f"Облако смыслов канала:\n{clean_title}",
         colormap='magma',
         max_words=MAX_WORDS_CLOUD,
     )
@@ -161,7 +163,7 @@ def generate_sentiment_cloud(
     return _create_cloud(
         words=words,
         path=path,
-        title_text=f"{header} канала: {clean_title}",
+        title_text=f"{header} канала:\n{clean_title}",
         colormap=colormap,
     )
 
@@ -184,7 +186,7 @@ def generate_mats_cloud(username: str, words: list[str], title: str) -> str | No
     return _create_cloud(
         words=words,
         path=path,
-        title_text=f"Облако мата канала: {clean_title}",
+        title_text=f"Облако мата канала:\n{clean_title}",
         colormap='Reds',
     )
 
@@ -199,10 +201,6 @@ def generate_register_cloud(
 ) -> str | None:
     """
     Генерирует облако регистра (CAPS vs lowercase).
-
-    Слова окрашиваются по регистру:
-    - CAPS слова — красный/огненный цвет
-    - lowercase слова — синий/спокойный цвет
 
     Args:
         username: Имя пользователя/канала.
@@ -228,13 +226,6 @@ def generate_register_cloud(
         path = f"register_{username}.png"
         clean_title = _clean_title(title)
 
-        # Создаём словарь слово -> регистр для окраски
-        word_register: dict[str, str] = {}
-        for word in caps_words:
-            word_register[word.upper()] = 'caps'
-        for word in lower_words:
-            word_register[word.lower()] = 'lower'
-
         # Объединяем все слова (сохраняя регистр для отображения)
         all_words = [w.upper() for w in caps_words] + [w.lower() for w in lower_words]
 
@@ -243,7 +234,6 @@ def generate_register_cloud(
 
         # Функция окраски по регистру
         def register_color_func(word, font_size, position, orientation, random_state=None, **kwargs):
-            # Определяем регистр по слову
             if word.isupper():
                 # CAPS — огненные оттенки (красный/оранжевый)
                 r = random.randint(200, 255)
@@ -266,27 +256,27 @@ def generate_register_cloud(
             prefer_horizontal=True,
         ).generate(" ".join(all_words))
 
-        fig = plt.figure(figsize=(12, 7), facecolor='white')
-        ax = fig.add_axes([0.0, 0.08, 1.0, 0.78])
+        fig = plt.figure(figsize=FIGURE_SIZE, facecolor='white')
+        ax = fig.add_axes([0.02, 0.05, 0.96, 0.82])
         ax.imshow(wc.to_image(), interpolation='bilinear')
         ax.axis("off")
 
         # Заголовок
         fig.text(
-            0.5, 0.94, f"Облако регистра: {clean_title}",
+            0.5, 0.95, f"Облако регистра:\n{clean_title}",
             fontsize=20, fontweight='bold', ha='center', va='center', color='#2d3436'
         )
 
         # Статистика процентов
         stats_text = f"🔥 CAPS: {caps_percent:.1f}%  |  💙 lowercase: {lower_percent:.1f}%"
         fig.text(
-            0.5, 0.88, stats_text,
+            0.5, 0.90, stats_text,
             fontsize=14, ha='center', va='center', color='#636e72', style='italic'
         )
 
         # Водяной знак
         fig.text(
-            0.5, 0.03, WATERMARK_TEXT,
+            0.5, 0.02, WATERMARK_TEXT,
             fontsize=11, ha='center', color=WATERMARK_COLOR, alpha=0.9, fontweight='bold'
         )
 
@@ -311,6 +301,7 @@ def generate_dichotomy_cloud(
 ) -> str | None:
     """
     Генерирует облако дихотомии языка (метафизика vs быт).
+    Два облака вертикально (стопкой) для Stories формата.
 
     Args:
         username: Имя пользователя/канала.
@@ -335,11 +326,11 @@ def generate_dichotomy_cloud(
         path = f"dichotomy_{username}.png"
         clean_title = _clean_title(title)
 
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 7), facecolor='white')
+        # Два облака вертикально (стопкой)
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=FIGURE_SIZE, facecolor='white')
 
         # Функция окраски для метафизики (тёмные оттенки)
         def meta_color_func(word, font_size, position, orientation, random_state=None, **kwargs):
-            # Тёмно-коричневый / чёрный
             r = random.randint(30, 80)
             g = random.randint(20, 50)
             b = random.randint(10, 40)
@@ -347,15 +338,14 @@ def generate_dichotomy_cloud(
 
         # Функция окраски для быта (серые оттенки)
         def everyday_color_func(word, font_size, position, orientation, random_state=None, **kwargs):
-            # Серый
             gray = random.randint(80, 140)
             return f"rgb({gray}, {gray}, {gray})"
 
-        # Левое облако - метафизика
+        # Верхнее облако - метафизика
         if metaphysics_words:
             wc_meta = WordCloud(
-                width=500,
-                height=400,
+                width=800,
+                height=600,
                 background_color='white',
                 color_func=meta_color_func,
                 max_words=50,
@@ -364,13 +354,13 @@ def generate_dichotomy_cloud(
             ).generate(" ".join(metaphysics_words))
             ax1.imshow(wc_meta.to_image(), interpolation='bilinear')
         ax1.axis("off")
-        ax1.set_title("ВЫСОКИЙ РЕГИСТР\n(МЕТАФИЗИКА)", fontsize=12, fontweight='bold', color='#2d3436', pad=10)
+        ax1.set_title("ВЫСОКИЙ РЕГИСТР\n(МЕТАФИЗИКА)", fontsize=14, fontweight='bold', color='#2d3436', pad=10)
 
-        # Правое облако - быт
+        # Нижнее облако - быт
         if everyday_words:
             wc_everyday = WordCloud(
-                width=500,
-                height=400,
+                width=800,
+                height=600,
                 background_color='white',
                 color_func=everyday_color_func,
                 max_words=50,
@@ -379,28 +369,28 @@ def generate_dichotomy_cloud(
             ).generate(" ".join(everyday_words))
             ax2.imshow(wc_everyday.to_image(), interpolation='bilinear')
         ax2.axis("off")
-        ax2.set_title("НИЗКИЙ РЕГИСТР\n(БЫТ И ВЕЩИ)", fontsize=12, fontweight='bold', color='#636e72', pad=10)
+        ax2.set_title("НИЗКИЙ РЕГИСТР\n(БЫТ И ВЕЩИ)", fontsize=14, fontweight='bold', color='#636e72', pad=10)
 
         # Главный заголовок
         fig.suptitle(
-            f"Дихотомия языка: {clean_title}",
-            fontsize=18, fontweight='bold', color='#2d3436', y=0.96
+            f"Дихотомия языка:\n{clean_title}",
+            fontsize=18, fontweight='bold', color='#2d3436', y=0.97
         )
 
         # Статистика процентов
         stats_text = f"Метафизика: {meta_percent:.1f}%  |  Быт: {everyday_percent:.1f}%"
         fig.text(
-            0.5, 0.88, stats_text,
+            0.5, 0.92, stats_text,
             fontsize=13, ha='center', va='center', color='#636e72', style='italic'
         )
 
         # Водяной знак
         fig.text(
-            0.5, 0.03, WATERMARK_TEXT,
+            0.5, 0.02, WATERMARK_TEXT,
             fontsize=11, ha='center', color=WATERMARK_COLOR, alpha=0.9, fontweight='bold'
         )
 
-        fig.tight_layout(rect=[0.02, 0.08, 0.98, 0.85])
+        fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.90])
         fig.savefig(path, dpi=DPI, facecolor='white')
         plt.close(fig)
 
@@ -409,4 +399,100 @@ def generate_dichotomy_cloud(
 
     except Exception as e:
         logger.error(f"Ошибка создания облака дихотомии: {e}")
+        return None
+
+
+def generate_sentiment_dual_cloud(
+    username: str,
+    pos_words: list[str],
+    agg_words: list[str],
+    title: str,
+    pos_percent: float,
+    agg_percent: float,
+) -> str | None:
+    """
+    Генерирует двойное облако тональности: позитив и негатив (стопкой для Stories).
+
+    Args:
+        username: Имя пользователя/канала.
+        pos_words: Список позитивных слов.
+        agg_words: Список агрессивных/негативных слов.
+        title: Название канала.
+        pos_percent: Процент позитивных слов.
+        agg_percent: Процент негативных слов.
+
+    Returns:
+        Путь к файлу или None.
+    """
+    total_words = len(pos_words) + len(agg_words)
+    if total_words < 5:
+        return None
+
+    try:
+        path = f"sentiment_{username}.png"
+        clean_title = _clean_title(title)
+
+        # Два облака вертикально (стопкой)
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=FIGURE_SIZE, facecolor='white')
+
+        # Верхнее облако — позитив (зелёные оттенки)
+        if pos_words:
+            color_func_pos = _make_color_func('Greens')
+            wc_pos = WordCloud(
+                width=800,
+                height=600,
+                background_color='white',
+                color_func=color_func_pos,
+                max_words=50,
+                min_font_size=10,
+                prefer_horizontal=True,
+            ).generate(" ".join(pos_words))
+            ax1.imshow(wc_pos.to_image(), interpolation='bilinear')
+        ax1.axis("off")
+        ax1.set_title("ПОЗИТИВ 😊", fontsize=16, fontweight='bold', color='#27ae60', pad=10)
+
+        # Нижнее облако — негатив (красно-оранжевые оттенки)
+        if agg_words:
+            color_func_agg = _make_color_func('OrRd')
+            wc_agg = WordCloud(
+                width=800,
+                height=600,
+                background_color='white',
+                color_func=color_func_agg,
+                max_words=50,
+                min_font_size=10,
+                prefer_horizontal=True,
+            ).generate(" ".join(agg_words))
+            ax2.imshow(wc_agg.to_image(), interpolation='bilinear')
+        ax2.axis("off")
+        ax2.set_title("НЕГАТИВ 😡", fontsize=16, fontweight='bold', color='#e74c3c', pad=10)
+
+        # Главный заголовок
+        fig.suptitle(
+            f"Тональность канала:\n{clean_title}",
+            fontsize=18, fontweight='bold', color='#2d3436', y=0.97
+        )
+
+        # Статистика процентов
+        stats_text = f"Позитив: {pos_percent:.1f}%  |  Негатив: {agg_percent:.1f}%"
+        fig.text(
+            0.5, 0.92, stats_text,
+            fontsize=13, ha='center', va='center', color='#636e72', style='italic'
+        )
+
+        # Водяной знак
+        fig.text(
+            0.5, 0.02, WATERMARK_TEXT,
+            fontsize=11, ha='center', color=WATERMARK_COLOR, alpha=0.9, fontweight='bold'
+        )
+
+        fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.90])
+        fig.savefig(path, dpi=DPI, facecolor='white')
+        plt.close(fig)
+
+        logger.info(f"Создано двойное облако тональности: {path}")
+        return path
+
+    except Exception as e:
+        logger.error(f"Ошибка создания облака тональности: {e}")
         return None

@@ -1,5 +1,6 @@
 """
 Генерация графиков и диаграмм.
+Все графики в вертикальном формате 9:16 (1080×1920) для Stories.
 """
 import logging
 from collections import Counter
@@ -10,20 +11,20 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import numpy as np
 
-from config import DPI, BACKGROUND_COLOR, WATERMARK_TEXT, WATERMARK_COLOR
+from config import DPI, FIGURE_SIZE, BACKGROUND_COLOR, WATERMARK_TEXT, WATERMARK_COLOR
 from visualization.utils import clean_title as _clean_title
 
 logger = logging.getLogger(__name__)
 
 
-def _setup_figure(figsize: tuple[int, int] = (12, 7)) -> tuple[plt.Figure, plt.Axes]:
+def _setup_figure(figsize: tuple[float, float] = FIGURE_SIZE) -> tuple[plt.Figure, plt.Axes]:
     """Создаёт фигуру с базовыми настройками."""
     fig, ax = plt.subplots(figsize=figsize, facecolor=BACKGROUND_COLOR)
     ax.set_facecolor(BACKGROUND_COLOR)
     return fig, ax
 
 
-def _add_watermark(fig: plt.Figure, y: float = 0.03) -> None:
+def _add_watermark(fig: plt.Figure, y: float = 0.02) -> None:
     """Добавляет водяной знак."""
     fig.text(
         0.5, y, WATERMARK_TEXT,
@@ -71,7 +72,7 @@ def generate_top_words_chart(
 
         clean_title = _clean_title(title)
         fig.suptitle(
-            f"Топ-{top_n} ключевых слов канала {clean_title}",
+            f"Топ-{top_n} ключевых слов канала\n{clean_title}",
             fontsize=20, fontweight='bold', color='#2d3436', y=0.96
         )
 
@@ -82,11 +83,11 @@ def generate_top_words_chart(
                 f'{int(width)}', va='center', fontsize=13, fontweight='bold', color='#2d3436'
             )
 
-        ax.tick_params(axis='y', pad=10, labelsize=11)
+        ax.tick_params(axis='y', pad=10, labelsize=12)
         _add_watermark(fig)
         _style_axes(ax)
 
-        fig.tight_layout(rect=[0.02, 0.08, 0.98, 0.92])
+        fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.93])
         fig.savefig(path, dpi=DPI, facecolor=fig.get_facecolor())
         plt.close(fig)
 
@@ -122,11 +123,11 @@ def generate_weekday_chart(
         fig, ax = _setup_figure()
 
         colors = cm.viridis(np.linspace(0.15, 0.55, 7))
-        bars = ax.bar(days, values, color=colors, edgecolor='white', linewidth=1)
+        bars = ax.bar(days, values, color=colors, edgecolor='white', linewidth=1, width=0.7)
 
         clean_title = _clean_title(title)
         fig.suptitle(
-            f"Количество постов по дням недели: {clean_title}",
+            f"Количество постов по дням недели\n{clean_title}",
             fontsize=20, fontweight='bold', color='#2d3436', y=0.96
         )
 
@@ -134,13 +135,14 @@ def generate_weekday_chart(
             height = bar.get_height()
             ax.text(
                 bar.get_x() + bar.get_width() / 2, height + max(values) * 0.01,
-                f'{int(height)}', ha='center', fontsize=13, fontweight='bold', color='#2d3436'
+                f'{int(height)}', ha='center', fontsize=14, fontweight='bold', color='#2d3436'
             )
 
+        ax.tick_params(axis='x', labelsize=14)
         _add_watermark(fig)
         _style_axes(ax)
 
-        fig.tight_layout(rect=[0.02, 0.08, 0.98, 0.92])
+        fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.93])
         fig.savefig(path, dpi=DPI, facecolor=fig.get_facecolor())
         plt.close(fig)
 
@@ -158,7 +160,7 @@ def generate_hour_chart(
     title: str
 ) -> str | None:
     """
-    Генерирует график времени публикаций.
+    Генерирует график времени публикаций (горизонтальные бары для вертикального формата).
 
     Args:
         username: Имя пользователя/канала.
@@ -174,8 +176,7 @@ def generate_hour_chart(
         max_val = max(values) if values else 1
 
         path = f"hour_{username}.png"
-        fig, ax = plt.subplots(figsize=(14, 7.5), facecolor=BACKGROUND_COLOR)
-        ax.set_facecolor(BACKGROUND_COLOR)
+        fig, ax = _setup_figure()
 
         # Цвета по времени суток
         colors = []
@@ -187,35 +188,34 @@ def generate_hour_chart(
             else:
                 colors.append('#3b82f6')  # День
 
-        bars = ax.bar(hours, values, color=colors, width=0.82, edgecolor='white', linewidth=0.4)
+        # Горизонтальные бары — идеально для вертикального формата
+        hour_labels = [f"{h:02d}:00" for h in hours]
+        bars = ax.barh(hour_labels, values, color=colors, height=0.75, edgecolor='white', linewidth=0.4)
 
         clean_title = _clean_title(title)
         fig.suptitle(
-            f"Время публикаций постов • {clean_title}",
+            f"Время публикаций постов\n{clean_title}",
             fontsize=20, fontweight='bold', color='#2d3436', y=0.96
         )
 
         for bar in bars:
-            height = bar.get_height()
-            if height > 0:
+            width = bar.get_width()
+            if width > 0:
                 ax.text(
-                    bar.get_x() + bar.get_width() / 2, height + max_val * 0.03,
-                    f'{int(height)}', ha='center', va='bottom', fontsize=10, fontweight='bold', color='#111827'
+                    width + max_val * 0.02, bar.get_y() + bar.get_height() / 2,
+                    f'{int(width)}', va='center', fontsize=10, fontweight='bold', color='#111827'
                 )
 
-        ax.set_xticks(hours)
-        ax.set_xticklabels([f"{h:02d}:00" for h in hours], fontsize=9, rotation=45, ha='right')
-        ax.set_yticks(np.arange(0, max_val + max_val * 0.15, max(5, int(max_val / 5))))
+        ax.set_xlabel("Количество постов", fontsize=12, labelpad=10)
+        ax.tick_params(axis='y', labelsize=10)
+        ax.invert_yaxis()  # 00:00 сверху
 
-        ax.set_xlabel("Час суток (московское время)", fontsize=12, labelpad=10)
-        ax.set_ylabel("Количество постов", fontsize=12, labelpad=10)
-
-        ax.grid(axis='y', linestyle='--', alpha=0.3, color='gray')
+        ax.grid(axis='x', linestyle='--', alpha=0.3, color='gray')
         _style_axes(ax)
         _add_watermark(fig)
 
-        fig.tight_layout(rect=[0.04, 0.12, 0.96, 0.92])
-        fig.savefig(path, dpi=160, bbox_inches='tight', facecolor=fig.get_facecolor())
+        fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.93])
+        fig.savefig(path, dpi=DPI, facecolor=fig.get_facecolor())
         plt.close(fig)
 
         logger.info(f"Создан график по часам: {path}")
@@ -264,11 +264,8 @@ def generate_names_chart(
         labels = [x[0] for x in filtered][::-1]
         counts = [x[1] for x in filtered][::-1]
 
-        # Динамическая высота в зависимости от количества имён
-        fig_height = max(8, min(14, len(labels) * 0.4 + 2))
         path = f"names_{username}.png"
-        fig, ax = plt.subplots(figsize=(14, fig_height), facecolor=BACKGROUND_COLOR)
-        ax.set_facecolor(BACKGROUND_COLOR)
+        fig, ax = _setup_figure()
 
         # Градиент от тёплых к холодным цветам
         colors = cm.plasma(np.linspace(0.0, 0.55, len(labels)))
@@ -276,13 +273,9 @@ def generate_names_chart(
 
         clean_title = _clean_title(title)
 
-        # Позиция подзаголовка зависит от того, в 1 или 2 строки заголовок
-        subtitle_y = 0.85 if '\n' in clean_title else 0.89
-
-        # Заголовок с правильным отступом
         fig.suptitle(
-            f"Топ упомянутых личностей • {clean_title}",
-            fontsize=18, fontweight='bold', color='#2d3436', y=0.95
+            f"Топ упомянутых личностей\n{clean_title}",
+            fontsize=18, fontweight='bold', color='#2d3436', y=0.96
         )
 
         # Подзаголовок со статистикой
@@ -291,7 +284,7 @@ def generate_names_chart(
             if total_mentions > 0:
                 subtitle += f" • Всего упоминаний: {total_mentions}"
             fig.text(
-                0.5, subtitle_y, subtitle,
+                0.5, 0.92, subtitle,
                 fontsize=11, ha='center', va='center', color='#636e72', style='italic'
             )
 
@@ -311,9 +304,8 @@ def generate_names_chart(
         _style_axes(ax)
         _add_watermark(fig)
 
-        fig.subplots_adjust(top=0.85)
-        fig.tight_layout(rect=[0.02, 0.07, 0.98, 0.88])
-        fig.savefig(path, dpi=160, bbox_inches='tight', facecolor=fig.get_facecolor())
+        fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.90])
+        fig.savefig(path, dpi=DPI, facecolor=fig.get_facecolor())
         plt.close(fig)
 
         logger.info(f"Создан график имён: {path}")
@@ -358,7 +350,7 @@ def generate_phrases_chart(
 
         clean_title = _clean_title(title)
         fig.suptitle(
-            f"Топ-{top_n} часто используемых фраз: {clean_title}",
+            f"Топ-{top_n} часто используемых фраз\n{clean_title}",
             fontsize=20, fontweight='bold', color='#2d3436', y=0.96
         )
 
@@ -373,8 +365,7 @@ def generate_phrases_chart(
         _add_watermark(fig)
         _style_axes(ax)
 
-        fig.subplots_adjust(top=0.85)
-        fig.tight_layout(rect=[0.02, 0.08, 0.98, 0.88])
+        fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.93])
         fig.savefig(path, dpi=DPI, facecolor=fig.get_facecolor())
         plt.close(fig)
 
@@ -392,7 +383,8 @@ def generate_heatmap_chart(
     title: str
 ) -> str | None:
     """
-    Генерирует тепловую карту активности (день недели × час).
+    Генерирует тепловую карту активности (час × день недели).
+    Транспонированная для вертикального формата: часы по вертикали, дни по горизонтали.
 
     Args:
         username: Имя пользователя/канала.
@@ -406,28 +398,27 @@ def generate_heatmap_chart(
         if not posts_times:
             return None
 
-        # Строим матрицу 7×24
-        matrix = np.zeros((7, 24), dtype=int)
+        # Строим матрицу 24×7 (транспонированная: часы × дни)
+        matrix = np.zeros((24, 7), dtype=int)
         for weekday, hour in posts_times:
-            matrix[weekday][hour] += 1
+            matrix[hour][weekday] += 1
 
         path = f"heatmap_{username}.png"
-        fig, ax = plt.subplots(figsize=(14, 5), facecolor=BACKGROUND_COLOR)
-        ax.set_facecolor(BACKGROUND_COLOR)
+        fig, ax = _setup_figure()
 
         im = ax.imshow(matrix, cmap='YlOrRd', aspect='auto', interpolation='nearest')
 
         # Оси
         days = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
-        hours = [f"{h:02d}" for h in range(24)]
-        ax.set_xticks(range(24))
-        ax.set_xticklabels(hours, fontsize=9)
-        ax.set_yticks(range(7))
-        ax.set_yticklabels(days, fontsize=11)
+        hours = [f"{h:02d}:00" for h in range(24)]
+        ax.set_xticks(range(7))
+        ax.set_xticklabels(days, fontsize=12, fontweight='bold')
+        ax.set_yticks(range(24))
+        ax.set_yticklabels(hours, fontsize=9)
 
         # Аннотации (только если значение > 0)
-        for i in range(7):
-            for j in range(24):
+        for i in range(24):
+            for j in range(7):
                 val = matrix[i][j]
                 if val > 0:
                     color = 'white' if val > matrix.max() * 0.6 else '#2d3436'
@@ -436,15 +427,16 @@ def generate_heatmap_chart(
 
         clean_title = _clean_title(title)
         fig.suptitle(
-            f"Тепловая карта активности • {clean_title}",
-            fontsize=18, fontweight='bold', color='#2d3436', y=0.98
+            f"Тепловая карта активности\n{clean_title}",
+            fontsize=18, fontweight='bold', color='#2d3436', y=0.96
         )
 
-        fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
-        _add_watermark(fig, y=0.02)
+        fig.colorbar(im, ax=ax, shrink=0.5, pad=0.03, orientation='horizontal',
+                     location='bottom')
+        _add_watermark(fig)
 
-        fig.tight_layout(rect=[0.02, 0.08, 0.95, 0.92])
-        fig.savefig(path, dpi=DPI, bbox_inches='tight', facecolor=fig.get_facecolor())
+        fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.93])
+        fig.savefig(path, dpi=DPI, facecolor=fig.get_facecolor())
         plt.close(fig)
 
         logger.info(f"Создана тепловая карта: {path}")
@@ -498,7 +490,8 @@ def generate_comparison_chart(
         angles += [angles[0]]
 
         path = "comparison_chart.png"
-        fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(polar=True), facecolor=BACKGROUND_COLOR)
+        fig, ax = plt.subplots(figsize=FIGURE_SIZE, subplot_kw=dict(polar=True),
+                               facecolor=BACKGROUND_COLOR)
         ax.set_facecolor(BACKGROUND_COLOR)
 
         # Рисуем области
@@ -521,16 +514,16 @@ def generate_comparison_chart(
         clean1 = _clean_title(channel1_name, 15)
         clean2 = _clean_title(channel2_name, 15)
         fig.suptitle(
-            f"Сравнение: {clean1} vs {clean2}",
-            fontsize=18, fontweight='bold', color='#2d3436', y=0.98
+            f"Сравнение\n{clean1} vs {clean2}",
+            fontsize=18, fontweight='bold', color='#2d3436', y=0.96
         )
 
         # Легенда
         ax.legend(loc='upper right', bbox_to_anchor=(1.15, 1.1), fontsize=11)
 
-        _add_watermark(fig, y=0.02)
+        _add_watermark(fig)
 
-        fig.tight_layout(rect=[0.02, 0.08, 0.98, 0.92])
+        fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.93])
         fig.savefig(path, dpi=DPI, bbox_inches='tight', facecolor=fig.get_facecolor())
         plt.close(fig)
 

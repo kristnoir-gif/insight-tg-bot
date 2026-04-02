@@ -24,11 +24,11 @@ from telethon.tl.functions.channels import LeaveChannelRequest
 from telethon.tl.types import User
 
 from config import MOSCOW_TZ, DEFAULT_MESSAGE_LIMIT, DISK_CACHE_TTL, DISK_CACHE_TTL_LITE, FETCH_DELAY_EVERY_N, FETCH_DELAY_SECONDS, CACHE_DIR, WEB_PARSER_MAX_PAGES
-from nlp.processor import get_clean_words, extract_emojis, extract_phrases
+from nlp.processor import get_clean_words, extract_emojis, extract_phrases, count_animals, count_food, count_cities
 from nlp.constants import positive_words, aggressive_words, METAPHYSICS_WORDS, EVERYDAY_WORDS
 from visualization.wordclouds import (
     generate_main_cloud,
-    generate_sentiment_cloud,
+    generate_sentiment_dual_cloud,
     generate_mats_cloud,
     generate_register_cloud,
     generate_dichotomy_cloud,
@@ -40,6 +40,7 @@ from visualization.charts import (
     generate_names_chart,
     generate_phrases_chart,
     generate_heatmap_chart,
+    generate_mentions_chart,
 )
 
 logger = logging.getLogger(__name__)
@@ -79,8 +80,7 @@ class AnalysisResult:
     cloud_path: str | None = None
     graph_path: str | None = None
     mats_path: str | None = None
-    positive_path: str | None = None
-    aggressive_path: str | None = None
+    sentiment_path: str | None = None
     weekday_path: str | None = None
     hour_path: str | None = None
     names_path: str | None = None
@@ -88,6 +88,21 @@ class AnalysisResult:
     register_path: str | None = None
     dichotomy_path: str | None = None
     heatmap_path: str | None = None
+    archetype_path: str | None = None
+    topics_path: str | None = None
+    insights_path: str | None = None
+    mentions_path: str | None = None
+
+    # AI-анализ личности автора
+    personality_text: str | None = None
+    # AI-анализ контента канала
+    content_analysis_text: str | None = None
+
+    # Архетип и факты (для карточки)
+    archetype_name: str | None = None
+    fun_facts: list[str] = field(default_factory=list)
+    topics: list[str] = field(default_factory=list)
+    insights: list[str] = field(default_factory=list)
 
     # Данные
     top_emojis: list[tuple[str, int]] = field(default_factory=list)
@@ -97,11 +112,127 @@ class AnalysisResult:
         """Возвращает список всех путей к файлам."""
         paths = [
             self.cloud_path, self.graph_path, self.mats_path,
-            self.positive_path, self.aggressive_path, self.weekday_path,
+            self.sentiment_path, self.weekday_path,
             self.hour_path, self.names_path, self.phrases_path,
-            self.register_path, self.dichotomy_path, self.heatmap_path
+            self.register_path, self.dichotomy_path, self.heatmap_path,
+            self.archetype_path, self.topics_path, self.insights_path,
+            self.mentions_path,
         ]
         return [p for p in paths if p]
+
+
+def generate_insights(
+    hour_counts: dict[int, int],
+    weekday_counts: dict[int, int],
+    pos_percent: float,
+    agg_percent: float,
+    meta_percent: float,
+    everyday_percent: float,
+    unique_names_count: int,
+    total_names_mentions: int,
+    top_phrases: list[tuple[tuple[str, ...], int]],
+    word_counter: "Counter",
+    total_posts: int,
+    repost_percent: float,
+    avg_len: float,
+    scream_index: float,
+    night_post_percent: float,
+) -> list[str]:
+    """Генерирует текстовые инсайты по метрикам канала — один на каждый график."""
+    insights = []
+    weekdays_names = ['понедельник', 'вторник', 'среду', 'четверг', 'пятницу', 'субботу', 'воскресенье']
+
+    # 1. Активность по часам
+    if hour_counts:
+        peak_h = max(hour_counts, key=hour_counts.get)
+        if 6 <= peak_h <= 9:
+            insights.append(f"⏰ Пик постов в {peak_h}:00 — канал целится в утреннюю аудиторию")
+        elif 10 <= peak_h <= 13:
+            insights.append(f"⏰ Пик постов в {peak_h}:00 — дневной ритм, контент для обеденного перерыва")
+        elif 14 <= peak_h <= 18:
+            insights.append(f"⏰ Пик постов в {peak_h}:00 — вечерний прайм-тайм")
+        elif 19 <= peak_h <= 22:
+            insights.append(f"⏰ Пик постов в {peak_h}:00 — ловит аудиторию на отдыхе")
+        else:
+            insights.append(f"⏰ Пик постов в {peak_h}:00 — автор-полуночник")
+
+    # 2. Активность по дням
+    if weekday_counts:
+        peak_wd = max(weekday_counts, key=weekday_counts.get)
+        min_wd = min(weekday_counts, key=weekday_counts.get)
+        weekend_posts = weekday_counts.get(5, 0) + weekday_counts.get(6, 0)
+        weekday_posts = sum(weekday_counts.get(d, 0) for d in range(5))
+        if weekend_posts > weekday_posts * 0.5 and weekday_posts > 0:
+            insights.append("📅 Активен по выходным — канал не знает отдыха")
+        elif weekend_posts == 0 and total_posts > 30:
+            insights.append("📅 Мёртвая зона — выходные. Канал работает как офис 5/2")
+        elif peak_wd in (5, 6):
+            insights.append(f"📅 Больше всего постов в {weekdays_names[peak_wd]} — работает на выходных")
+        else:
+            insights.append(f"📅 Самый продуктивный день — {weekdays_names[peak_wd]}")
+
+    # 3. Тональность
+    if pos_percent > 0 or agg_percent > 0:
+        if pos_percent > 70:
+            insights.append(f"😊 {pos_percent:.0f}% позитивных слов — один из самых светлых каналов")
+        elif agg_percent > 50:
+            insights.append(f"😤 {agg_percent:.0f}% агрессивной лексики — канал не для слабонервных")
+        elif pos_percent > agg_percent:
+            insights.append(f"😊 Позитив перевешивает: {pos_percent:.0f}% против {agg_percent:.0f}% агрессии")
+        else:
+            insights.append(f"⚡ Агрессия перевешивает позитив: {agg_percent:.0f}% против {pos_percent:.0f}%")
+
+    # 4. Дихотомия
+    if meta_percent > 0 or everyday_percent > 0:
+        if meta_percent > 70:
+            insights.append(f"🧠 Канал на {meta_percent:.0f}% метафизичен — философия, абстракции, глубина")
+        elif everyday_percent > 70:
+            insights.append(f"🏠 Канал на {everyday_percent:.0f}% бытовой — конкретика, жизнь, практика")
+        elif meta_percent > 55:
+            insights.append(f"🧠 Баланс смещён в сторону абстрактного ({meta_percent:.0f}% метафизика)")
+        else:
+            insights.append(f"🏠 Баланс смещён в сторону бытового ({everyday_percent:.0f}% повседневное)")
+
+    # 5. Упоминания имён
+    if unique_names_count > 0:
+        if unique_names_count > 50:
+            insights.append(f"👥 {unique_names_count} упомянутых личностей — автор знает полгорода")
+        elif unique_names_count > 20:
+            insights.append(f"👥 {unique_names_count} личностей — канал с широким кругом героев")
+        elif total_names_mentions > 0 and unique_names_count <= 5:
+            avg_mentions = total_names_mentions / max(unique_names_count, 1)
+            if avg_mentions > 5:
+                insights.append(f"👤 Всего {unique_names_count} имён, но каждое повторяется ~{avg_mentions:.0f} раз — узкий круг")
+
+    # 6. Фразы
+    if top_phrases:
+        phrase_str = " ".join(top_phrases[0][0])
+        phrase_count = top_phrases[0][1]
+        if phrase_count > total_posts * 0.1:
+            insights.append(f"💬 «{phrase_str}» встречается {phrase_count} раз — привычка автора")
+        elif phrase_count > 5:
+            insights.append(f"💬 Любимая фраза — «{phrase_str}» ({phrase_count} раз)")
+
+    # 7. Облако слов (топ-слово)
+    if word_counter:
+        top_word, top_count = word_counter.most_common(1)[0]
+        per_post = top_count / max(total_posts, 1)
+        if per_post > 0.5:
+            insights.append(f"🔤 «{top_word}» — в каждом втором посте. Главная тема канала?")
+        elif per_post > 0.3:
+            insights.append(f"🔤 «{top_word}» встречается в каждом 3-м посте")
+
+    # 8. Тепловая карта (паттерн активности)
+    if hour_counts and weekday_counts and night_post_percent > 30:
+        insights.append(f"🌙 {night_post_percent:.0f}% постов написаны ночью (23:00–05:00)")
+
+    # 9. Репосты
+    if repost_percent > 50:
+        insights.append(f"🔄 {repost_percent:.0f}% контента — репосты. Это канал-куратор, не автор")
+    elif repost_percent == 0 and total_posts > 30:
+        insights.append("✍️ 0% репостов — 100% авторский контент")
+
+    return insights
 
 
 def _get_cache_path(channel_id: str) -> str:
@@ -156,11 +287,18 @@ def _load_from_cache(channel_id: str, require_full: bool = False) -> AnalysisRes
             top_emojis=[(e[0], e[1]) for e in meta.get("top_emojis", [])],
         )
 
+        result.personality_text = meta.get("personality_text")
+        result.content_analysis_text = meta.get("content_analysis_text")
+        result.archetype_name = meta.get("archetype_name")
+        result.fun_facts = meta.get("fun_facts", [])
+        result.topics = meta.get("topics", [])
+        result.insights = meta.get("insights", [])
+
         # Копируем изображения из кэша во временные файлы
-        for img_name in ["cloud.png", "graph.png", "mats.png", "positive.png",
-                         "aggressive.png", "weekday.png", "hour.png",
+        for img_name in ["cloud.png", "graph.png", "mats.png", "sentiment.png",
+                         "weekday.png", "hour.png",
                          "names.png", "phrases.png", "register.png", "dichotomy.png",
-                         "heatmap.png"]:
+                         "heatmap.png", "archetype.png", "topics.png", "insights.png"]:
             src = os.path.join(cache_path, img_name)
             if os.path.exists(src):
                 dst = f"{channel_id}_{img_name}"
@@ -194,6 +332,12 @@ def _save_to_cache(channel_id: str, result: AnalysisResult, lite_mode: bool = Fa
             "unique_names_count": result.stats.unique_names_count,
             "total_names_mentions": result.stats.total_names_mentions,
             "top_emojis": result.top_emojis,
+            "personality_text": result.personality_text,
+            "content_analysis_text": result.content_analysis_text,
+            "archetype_name": result.archetype_name,
+            "fun_facts": result.fun_facts,
+            "topics": result.topics,
+            "insights": result.insights,
             "lite": lite_mode,
         }
         with open(os.path.join(cache_path, "meta.json"), "w") as f:
@@ -204,8 +348,7 @@ def _save_to_cache(channel_id: str, result: AnalysisResult, lite_mode: bool = Fa
             "cloud.png": result.cloud_path,
             "graph.png": result.graph_path,
             "mats.png": result.mats_path,
-            "positive.png": result.positive_path,
-            "aggressive.png": result.aggressive_path,
+            "sentiment.png": result.sentiment_path,
             "weekday.png": result.weekday_path,
             "hour.png": result.hour_path,
             "names.png": result.names_path,
@@ -213,6 +356,9 @@ def _save_to_cache(channel_id: str, result: AnalysisResult, lite_mode: bool = Fa
             "register.png": result.register_path,
             "dichotomy.png": result.dichotomy_path,
             "heatmap.png": result.heatmap_path,
+            "archetype.png": result.archetype_path,
+            "topics.png": result.topics_path,
+            "insights.png": result.insights_path,
         }
         for cache_name, src_path in path_mapping.items():
             if src_path and os.path.exists(src_path):
@@ -329,6 +475,23 @@ async def _fetch_posts_from_web(channel_username: str, limit: int = 500) -> tupl
     return title, subscribers, unique_posts[:limit]
 
 
+async def fetch_channel_posts(channel: str, limit: int = 500) -> tuple[str, int, list[str]] | None:
+    """
+    Получает посты канала через веб-парсинг (без Telethon).
+    Возвращает (title, subscribers, texts) или None при ошибке.
+    """
+    try:
+        channel_key = str(channel).lstrip('@').split('/')[-1].strip().lower()
+        title, subscribers, posts = await _fetch_posts_from_web(channel_key, limit)
+        if not posts:
+            return None
+        texts = [text for _, text in posts]
+        return title, subscribers, texts
+    except Exception as e:
+        logger.warning(f"fetch_channel_posts failed for {channel}: {e}")
+        return None
+
+
 async def _run_analysis_pipeline(
     posts: list[tuple[datetime, str]],
     channel_id: str,
@@ -337,6 +500,7 @@ async def _run_analysis_pipeline(
     lite_mode: bool,
     repost_count: int = 0,
     repost_percent: float = 0.0,
+    enable_llm: bool = False,
 ) -> AnalysisResult:
     """
     Общая логика анализа постов канала: извлечение слов, генерация графиков, статистика.
@@ -380,12 +544,25 @@ async def _run_analysis_pipeline(
 
     word_counter = Counter(all_words)
 
+    # Подсчёт тематических слов
+    all_texts_plain = [text for _, text in posts]
+    animal_counter = count_animals(all_texts_plain)
+    food_counter = count_food(all_texts_plain)
+    city_counter = count_cities(all_texts_plain)
+
     # Инициализация путей
-    mats_path = pos_path = agg_path = weekday_path = hour_path = None
+    mats_path = sentiment_path = weekday_path = hour_path = None
     heatmap_path = names_path = phrases_path = register_path = dichotomy_path = None
+    mentions_path = None
+    personality_result = None
     top_emojis = []
     unique_names_count = 0
     total_names_mentions = 0
+    pos_percent = agg_percent = meta_percent = everyday_percent = 0.0
+    night_post_percent = 0.0
+    hour_counts: Counter = Counter()
+    weekday_counts: Counter = Counter()
+    top_phrases: list = []
 
     if lite_mode:
         # LITE MODE: только облако + топ слов (параллельно)
@@ -434,13 +611,18 @@ async def _run_analysis_pipeline(
         emoji_freq = Counter(all_emojis)
         top_emojis = emoji_freq.most_common(20)
 
-        # Запускаем все 12 графиков параллельно
-        results = await asyncio.gather(
+        # Вычисляем проценты тональности
+        sentiment_total = len(pos_words) + len(agg_words)
+        pos_percent = (len(pos_words) / sentiment_total * 100) if sentiment_total > 0 else 0
+        agg_percent = (len(agg_words) / sentiment_total * 100) if sentiment_total > 0 else 0
+
+        # Запускаем все 11 графиков (+ LLM если включён) параллельно
+        charts_coro = asyncio.gather(
             _run_sync(generate_main_cloud, channel_id, all_words, title),
             _run_sync(generate_top_words_chart, channel_id, word_counter, title),
             _run_sync(generate_mats_cloud, channel_id, mat_words, title),
-            _run_sync(generate_sentiment_cloud, channel_id, pos_words, title, 'positive'),
-            _run_sync(generate_sentiment_cloud, channel_id, agg_words, title, 'aggressive'),
+            _run_sync(generate_sentiment_dual_cloud, channel_id, pos_words, agg_words, title,
+                      pos_percent, agg_percent),
             _run_sync(generate_weekday_chart, channel_id, dict(weekday_counts), title),
             _run_sync(generate_hour_chart, channel_id, dict(hour_counts), title),
             _run_sync(generate_heatmap_chart, channel_id, heatmap_times, title),
@@ -451,19 +633,65 @@ async def _run_analysis_pipeline(
                       caps_percent, lower_percent),
             _run_sync(generate_dichotomy_cloud, channel_id, metaphysics_words, everyday_words, title,
                       meta_percent, everyday_percent),
+            _run_sync(generate_mentions_chart, channel_id, animal_counter, food_counter, city_counter, title),
         )
-        (cloud_path, graph_path, mats_path, pos_path, agg_path,
+        if enable_llm:
+            from llm import generate_content_analysis
+
+            # Собираем текстовую сводку метрик для анализа контента
+            weekday_names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+            peak_h = max(hour_counts, key=hour_counts.get) if hour_counts else 0
+            peak_wd = max(weekday_counts, key=weekday_counts.get) if weekday_counts else 0
+            top10_words = ", ".join(w for w, _ in word_counter.most_common(10))
+            top5_emojis_str = ", ".join(f"{e} x{c}" for e, c in (emoji_freq.most_common(5) if emoji_freq else []))
+
+            # Период канала
+            dates_sorted = sorted(d for d, _ in posts)
+            date_range = f"{dates_sorted[0].strftime('%d.%m.%Y')} — {dates_sorted[-1].strftime('%d.%m.%Y')}" if dates_sorted else "?"
+
+            content_stats_text = (
+                f"Постов: {len(posts)}\n"
+                f"Период: {date_range}\n"
+                f"Репосты: {repost_count} ({repost_percent:.0f}%)\n"
+                f"Средняя длина поста: {round(np.mean([len(p[1].split()) for p in posts]), 1)} слов\n"
+                f"Уникальных слов: {len(set(all_words))}\n"
+                f"Пиковый час: {peak_h}:00\n"
+                f"Пиковый день: {weekday_names[peak_wd]}\n"
+                f"ТОП-10 слов: {top10_words}\n"
+                f"ТОП эмодзи: {top5_emojis_str}\n"
+                f"Позитивных слов: {pos_percent:.0f}% | Агрессивных: {agg_percent:.0f}%\n"
+                f"Метафизика: {meta_percent:.0f}% | Быт: {everyday_percent:.0f}%\n"
+                f"CAPS индекс: {round(np.mean(upper_ratios) * 100 + np.mean(excl_counts) * 10, 1) if upper_ratios else 0}"
+            )
+
+            llm_content_coro = generate_content_analysis(title, subscribers, content_stats_text, all_texts)
+            charts_results, content_analysis_result = await asyncio.gather(
+                charts_coro, llm_content_coro, return_exceptions=True,
+            )
+            if isinstance(charts_results, BaseException):
+                raise charts_results
+            if isinstance(content_analysis_result, BaseException):
+                logger.warning(f"LLM content failed: {content_analysis_result}")
+                content_analysis_result = None
+        else:
+            charts_results = await charts_coro
+            content_analysis_result = None
+
+        (cloud_path, graph_path, mats_path, sentiment_path,
          weekday_path, hour_path, heatmap_path, names_path,
-         phrases_path, register_path, dichotomy_path) = results
+         phrases_path, register_path, dichotomy_path,
+         mentions_path) = charts_results
 
     # Расчёт статистики
     avg_upper = np.mean(upper_ratios) if upper_ratios else 0
     avg_excl = np.mean(excl_counts) if excl_counts else 0
     scream_index = round(avg_upper * 100 + avg_excl * 10, 1)
+    unique_count = len(set(all_words))
+    avg_len_val = round(np.mean([len(p[1].split()) for p in posts]), 1)
 
     stats = ChannelStats(
-        unique_count=len(set(all_words)),
-        avg_len=round(np.mean([len(p[1].split()) for p in posts]), 1),
+        unique_count=unique_count,
+        avg_len=avg_len_val,
         scream_index=scream_index,
         unique_names_count=unique_names_count,
         total_names_mentions=total_names_mentions,
@@ -471,22 +699,152 @@ async def _run_analysis_pipeline(
         repost_percent=repost_percent,
     )
 
+    # Архетип канала (только full mode)
+    archetype_path = None
+    archetype_name = None
+    fun_facts_list: list[str] = []
+
+    if not lite_mode:
+        from visualization.archetype import classify_archetype, generate_archetype_card, generate_fun_facts
+
+        # Доля ночных постов (23:00-05:00)
+        night_posts = sum(1 for d, _ in posts
+                          if d.astimezone(MOSCOW_TZ).hour >= 23 or d.astimezone(MOSCOW_TZ).hour <= 4)
+        night_post_percent = (night_posts / len(posts) * 100) if posts else 0
+
+        # Пик по часам и дням
+        peak_hour = max(hour_counts, key=hour_counts.get) if hour_counts else None
+        peak_weekday = max(weekday_counts, key=weekday_counts.get) if weekday_counts else None
+
+        top_word = word_counter.most_common(1)[0][0] if word_counter else None
+        top_word_count = word_counter.most_common(1)[0][1] if word_counter else 0
+        top_emoji_item = top_emojis[0][0] if top_emojis else None
+
+        archetype = classify_archetype(
+            scream_index=scream_index,
+            avg_len=avg_len_val,
+            unique_count=unique_count,
+            mat_count=len(mat_words),
+            pos_percent=pos_percent,
+            agg_percent=agg_percent,
+            meta_percent=meta_percent,
+            everyday_percent=everyday_percent,
+            names_count=unique_names_count,
+            emoji_count=len(all_emojis),
+            repost_percent=repost_percent,
+            night_post_percent=night_post_percent,
+            total_posts=len(posts),
+        )
+        archetype_name = archetype.name
+
+        fun_facts_list = generate_fun_facts(
+            scream_index=scream_index,
+            avg_len=avg_len_val,
+            unique_count=unique_count,
+            total_posts=len(posts),
+            top_word=top_word,
+            top_word_count=top_word_count,
+            mat_count=len(mat_words),
+            pos_percent=pos_percent,
+            agg_percent=agg_percent,
+            night_post_percent=night_post_percent,
+            peak_hour=peak_hour,
+            peak_weekday=peak_weekday,
+            names_count=unique_names_count,
+            repost_percent=repost_percent,
+            emoji_count=len(all_emojis),
+            top_emoji=top_emoji_item,
+        )
+
+        stats_summary = {
+            'post_count': len(posts),
+            'unique_count': unique_count,
+            'avg_len': avg_len_val,
+            'scream_index': scream_index,
+            'top_word': top_word,
+            'top_emoji': top_emoji_item,
+            'peak_hour': peak_hour,
+            'subscribers': subscribers,
+            'fun_facts': fun_facts_list,
+            'pos_percent': pos_percent,
+            'night_post_percent': night_post_percent,
+            'repost_percent': repost_percent,
+        }
+
+        archetype_path = await _run_sync(
+            generate_archetype_card, channel_id, title, archetype, stats_summary
+        )
+
+    # Топ-3 темы канала через LLM (только full mode)
+    topics_path = None
+    topics_list: list[str] = []
+
+    if not lite_mode:
+        from llm import generate_topics
+        from visualization.archetype import generate_topics_card
+
+        all_texts = [text for _, text in posts]
+        top_words_list = [w for w, _ in word_counter.most_common(50)]
+        topics_list = await generate_topics(title, top_words_list, all_texts) or []
+
+        if topics_list:
+            topics_path = await _run_sync(
+                generate_topics_card, channel_id, title, topics_list
+            )
+
+    # Инсайты по графикам (только full mode)
+    insights_list: list[str] = []
+    insights_path = None
+    if not lite_mode:
+        insights_list = generate_insights(
+            hour_counts=dict(hour_counts),
+            weekday_counts=dict(weekday_counts),
+            pos_percent=pos_percent,
+            agg_percent=agg_percent,
+            meta_percent=meta_percent,
+            everyday_percent=everyday_percent,
+            unique_names_count=unique_names_count,
+            total_names_mentions=total_names_mentions,
+            top_phrases=top_phrases,
+            word_counter=word_counter,
+            total_posts=len(posts),
+            repost_percent=repost_percent,
+            avg_len=avg_len_val,
+            scream_index=scream_index,
+            night_post_percent=night_post_percent,
+        )
+        if insights_list:
+            from visualization.archetype import generate_insights_card
+            insights_path = await _run_sync(
+                generate_insights_card, channel_id, title, insights_list
+            )
+
     return AnalysisResult(
         title=title, subscribers=subscribers, stats=stats,
         cloud_path=cloud_path, graph_path=graph_path,
-        mats_path=mats_path, positive_path=pos_path, aggressive_path=agg_path,
+        mats_path=mats_path, sentiment_path=sentiment_path,
         weekday_path=weekday_path, hour_path=hour_path,
         names_path=names_path, phrases_path=phrases_path,
         register_path=register_path, dichotomy_path=dichotomy_path,
-        heatmap_path=heatmap_path,
+        heatmap_path=heatmap_path, archetype_path=archetype_path,
+        topics_path=topics_path,
+        insights_path=insights_path,
+        mentions_path=mentions_path,
+        personality_text=None,
+        content_analysis_text=content_analysis_result if not lite_mode else None,
         top_emojis=top_emojis,
+        archetype_name=archetype_name,
+        fun_facts=fun_facts_list,
+        topics=topics_list,
+        insights=insights_list,
     )
 
 
 async def analyze_channel_web(
     channel: str,
     limit: int = DEFAULT_MESSAGE_LIMIT,
-    lite_mode: bool = False
+    lite_mode: bool = False,
+    enable_llm: bool = False,
 ) -> AnalysisResult | None:
     """
     Анализирует публичный канал через веб-парсинг (без Telethon-аккаунта).
@@ -512,6 +870,7 @@ async def analyze_channel_web(
 
     result = await _run_analysis_pipeline(
         posts, channel_key, title, subscribers, lite_mode,
+        enable_llm=enable_llm,
     )
 
     if not result.cloud_path:
@@ -528,7 +887,8 @@ async def analyze_channel(
     channel: str | int,
     limit: int = DEFAULT_MESSAGE_LIMIT,
     is_private: bool = False,
-    lite_mode: bool = False
+    lite_mode: bool = False,
+    enable_llm: bool = False,
 ) -> AnalysisResult | None:
     """
     Анализирует Telegram-канал.
@@ -658,6 +1018,7 @@ async def analyze_channel(
         result = await _run_analysis_pipeline(
             posts, channel_id, title, subscribers, lite_mode,
             repost_count=repost_count, repost_percent=repost_percent,
+            enable_llm=enable_llm,
         )
 
         mode_str = "lite" if lite_mode else "full"

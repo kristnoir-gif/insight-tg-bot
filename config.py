@@ -123,22 +123,27 @@ PROXY_THIRD: Final[dict | None] = _parse_proxy(_PROXY_THIRD_STR)
 # --- Временная зона ---
 MOSCOW_TZ: Final[timezone] = timezone(timedelta(hours=3))
 
-# --- Визуализация ---
+# --- Визуализация (Spotify Wrapped style) ---
 DPI: Final[int] = 150
 MAX_WORDS_CLOUD: Final[int] = 200
 MAX_WORDS_SENTIMENT: Final[int] = 100
 CLOUD_WIDTH: Final[int] = 900
-CLOUD_HEIGHT: Final[int] = 1400
+CLOUD_HEIGHT: Final[int] = 1100
 FIGURE_SIZE: Final[tuple[float, float]] = (7.2, 12.8)  # 1080×1920 stories format (9:16)
-BACKGROUND_COLOR: Final[str] = "#f8f9fa"
-WATERMARK_TEXT: Final[str] = "Создано с помощью бота @insight_tg_bot"
-WATERMARK_COLOR: Final[str] = "#752E53"
+BACKGROUND_COLOR: Final[str] = "#0d1117"
+ACCENT_GREEN: Final[str] = "#1DB954"
+ACCENT_PINK: Final[str] = "#e91e8c"
+ACCENT_PURPLE: Final[str] = "#8b5cf6"
+ACCENT_BLUE: Final[str] = "#58a6ff"
+TEXT_WHITE: Final[str] = "#f0f6fc"
+TEXT_GRAY: Final[str] = "#8b949e"
+WATERMARK_TEXT: Final[str] = "Создано с помощью бота\n@insight_tg_bot"
+WATERMARK_COLOR: Final[str] = "#58a6ff"
 
 # --- Анализ ---
 # Лимиты сообщений для анализа
 DEFAULT_MESSAGE_LIMIT: Final[int] = 500  # Полный анализ (платные пользователи)
 FREE_MESSAGE_LIMIT: Final[int] = 150     # Облегчённый анализ (бесплатные пользователи)
-ADMIN_MESSAGE_LIMIT: Final[int] = 800    # Расширенный анализ (админы)
 
 # --- Тайминги и кэш ---
 RATE_LIMIT_SECONDS: Final[int] = 120            # Между запросами пользователя (снижено для высокой нагрузки)
@@ -165,8 +170,8 @@ CACHE_DIR: Final[str] = "cache"                   # Директория дис�
 
 # --- LLM (OpenAI-совместимый API: Groq, Alibaba DashScope, OpenRouter и др.) ---
 LLM_API_KEY: Final[str] = os.getenv("LLM_API_KEY", os.getenv("DASHSCOPE_API_KEY", ""))
-LLM_MODEL: Final[str] = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
-LLM_BASE_URL: Final[str] = os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1")
+LLM_MODEL: Final[str] = os.getenv("LLM_MODEL", "qwen-max")
+LLM_BASE_URL: Final[str] = os.getenv("LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 LLM_MAX_TOKENS: Final[int] = 4000  # Макс длина ответа
 LLM_TIMEOUT: Final[int] = 120      # Таймаут запроса к LLM (секунды)
 

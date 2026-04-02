@@ -36,8 +36,7 @@ from db import (
 )
 from handlers.common import (
     get_bot_instance,
-    PRICES_A,
-    PRICES_B,
+    PRICES,
 )
 
 logger = logging.getLogger(__name__)
@@ -256,8 +255,7 @@ async def cmd_paid_users(message: types.Message) -> None:
 
     if funnel:
         text += f"\n📊 *Воронка продаж:*\n"
-        text += f"_Цены A: {PRICES_A['pack_1']}/{PRICES_A['pack_3']}/{PRICES_A['pack_10']}⭐_\n"
-        text += f"_Цены B: {PRICES_B['pack_1']}/{PRICES_B['pack_3']}/{PRICES_B['pack_10']}⭐_\n\n"
+        text += f"_Цены: {PRICES['pack_1']}/{PRICES['pack_3']}/{PRICES['pack_10']}⭐_\n\n"
         menu = funnel.get('open_menu', {'clicks': 0, 'users': 0})
         text += f"  Открыли меню: {menu['clicks']} ({menu['users']} чел.)\n"
         for pack in ['pack_1', 'pack_3', 'pack_10']:
@@ -673,64 +671,6 @@ async def cmd_broadcast_paid(message: types.Message, bot: Bot) -> None:
 
 # --- Callback handlers ---
 
-@router.callback_query(F.data == "admin_help")
-async def callback_admin_help(callback: types.CallbackQuery) -> None:
-    """Обработчик кнопки 'Справка по командам'."""
-    if not is_admin(callback.from_user.id):
-        await callback.answer("⛔ Доступ запрещён", show_alert=True)
-        return
-
-    await callback.answer()
-
-    help_text = (
-        "🔐 *АДМИНСКИЕ КОМАНДЫ*\n\n"
-        "📊 *Статистика и мониторинг:*\n"
-        "`/admin` — основная статистика\n"
-        "`/floodstatus` — статус пула клиентов\n"
-        "`/payments` — отчёт по платежам\n"
-        "`/paid_users` — детальная статистика\n\n"
-        "🛠️ *Управление ботом:*\n"
-        "`/clear_floodwait` — сброс cooldown\n"
-        "`/clear_cache` — очистка кэша\n"
-        "`/clear_floodwait_db` — очистка FloodWait БД\n\n"
-        "📢 *Рассылки:*\n"
-        "`/broadcast <текст>` — всем\n"
-        "`/broadcast_paid <текст>` — платящим\n"
-        "`/send_pending` — уведомление о незавершённых\n\n"
-        "💡 Используйте кнопки ниже для быстрого доступа"
-    )
-
-    await callback.message.answer(help_text, parse_mode="Markdown")
-
-
-@router.callback_query(F.data == "admin_payments")
-async def callback_admin_payments(callback: types.CallbackQuery) -> None:
-    """Обработчик кнопки 'Платежи'."""
-    if not is_admin(callback.from_user.id):
-        await callback.answer("⛔ Доступ запрещён", show_alert=True)
-        return
-
-    await callback.answer()
-
-    temp_message = callback.message
-    temp_message.from_user = callback.from_user
-    await cmd_payments(temp_message)
-
-
-@router.callback_query(F.data == "admin_paid_users")
-async def callback_admin_paid_users(callback: types.CallbackQuery) -> None:
-    """Обработчик кнопки 'Платящие пользователи'."""
-    if not is_admin(callback.from_user.id):
-        await callback.answer("⛔ Доступ запрещён", show_alert=True)
-        return
-
-    await callback.answer()
-
-    temp_message = callback.message
-    temp_message.from_user = callback.from_user
-    await cmd_paid_users(temp_message)
-
-
 @router.callback_query(F.data == "admin_floodstatus")
 async def callback_admin_floodstatus(callback: types.CallbackQuery) -> None:
     """Обработчик кнопки 'Статус пула'."""
@@ -896,17 +836,6 @@ async def callback_channels_close(query: types.CallbackQuery):
     except Exception:
         pass
     await query.answer("Меню закрыто")
-
-
-@router.message(F.text == "📋 Мои каналы")
-async def cmd_my_channels_button(message: types.Message):
-    """Обработчик кнопки выбора каналов."""
-    user = message.from_user
-
-    if not is_admin(user.id):
-        return
-
-    await show_channels_menu(message, page=0)
 
 
 @router.message(F.text.startswith("📊 Админка"))

@@ -161,26 +161,15 @@ async def test_cmd_buy(temp_db):
             assert message.answer.call_count >= 1
 
 
-# --- common: get_ab_group ---
-
-def test_ab_group_consistency():
-    """A/B группа должна быть детерминистической."""
-    from handlers.common import get_ab_group
-    assert get_ab_group(100) == "a"  # чётный
-    assert get_ab_group(101) == "b"  # нечётный
-    assert get_ab_group(100) == get_ab_group(100)  # идемпотентно
-
-
 # --- common: get_prices ---
 
-def test_prices_differ_by_group():
-    """Цены должны различаться по A/B группам."""
+def test_prices_fixed():
+    """Цены одинаковые для всех пользователей."""
     from handlers.common import get_prices
     prices_a = get_prices(100)
     prices_b = get_prices(101)
-    assert prices_a != prices_b
-    assert "pack_1" in prices_a
-    assert "pack_1" in prices_b
+    assert prices_a == prices_b
+    assert prices_a == {'pack_1': 50, 'pack_3': 100, 'pack_10': 250}
 
 
 # --- common: format_wait_time ---

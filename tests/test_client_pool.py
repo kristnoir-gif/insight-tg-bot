@@ -161,12 +161,6 @@ class TestClientPool:
         selected = pool._select_best_account()
         assert selected.name == "fresh"
 
-    def test_get_account_by_name(self):
-        pool = ClientPool(cache_ttl=3600)
-        pool.add_account("main", MagicMock())
-        pool.add_account("backup", MagicMock())
-        assert pool.get_account_by_name("main") is not None
-        assert pool.get_account_by_name("nonexistent") is None
 
 
 class TestClientPoolAnalyze:

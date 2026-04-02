@@ -16,8 +16,8 @@ from aiogram.types import (
     InlineKeyboardButton,
 )
 
-from config import RATE_LIMIT_SECONDS, FLOODWAIT_PENALTY_SECONDS
-from db import is_admin, check_user_access
+from config import RATE_LIMIT_SECONDS, RATE_LIMIT_NEW_USER_SECONDS, FLOODWAIT_PENALTY_SECONDS
+from db import is_admin, check_user_access, get_user_analysis_count
 
 logger = logging.getLogger(__name__)
 
@@ -46,20 +46,14 @@ async def send_media_group_chunked(target, media: list, bot: "Bot | None" = None
         else:
             await bot.send_media_group(chat_id=chat_id, media=chunk)
 
-# A/B тест цен (Telegram Stars)
-PRICES_A = {'pack_1': 20, 'pack_3': 40, 'pack_10': 100}
-PRICES_B = {'pack_1': 50, 'pack_3': 100, 'pack_10': 250}
+# Цены (Telegram Stars)
+PRICES = {'pack_1': 50, 'pack_3': 100, 'pack_10': 250}
 SUPPORT_PRICE = 100  # Поддержка проекта
 
 
-def get_ab_group(user_id: int) -> str:
-    """Возвращает A/B группу пользователя."""
-    return "a" if user_id % 2 == 0 else "b"
-
-
-def get_prices(user_id: int) -> dict:
-    """Возвращает цены для пользователя по его A/B группе."""
-    return PRICES_A if user_id % 2 == 0 else PRICES_B
+def get_prices(user_id: int = 0) -> dict:
+    """Возвращает цены пакетов."""
+    return PRICES
 
 
 # Rate limiting (защита от спама и флудвейта)
@@ -157,8 +151,12 @@ def _check_rate_limit(user_id: int) -> tuple[bool, int]:
     last_request = _user_last_request.get(user_id, 0.0)
     elapsed = now - last_request
 
-    if elapsed < RATE_LIMIT_SECONDS:
-        remaining = int(RATE_LIMIT_SECONDS - elapsed)
+    # Новые юзеры (< 1 анализа) — увеличенный рейт-лимит (5 мин)
+    analysis_count = get_user_analysis_count(user_id)
+    effective_limit = RATE_LIMIT_NEW_USER_SECONDS if analysis_count < 1 else RATE_LIMIT_SECONDS
+
+    if elapsed < effective_limit:
+        remaining = int(effective_limit - elapsed)
         return False, remaining
 
     return True, 0
@@ -249,10 +247,18 @@ def _get_main_keyboard(user_id: int = 0) -> ReplyKeyboardMarkup:
             KeyboardButton(text="⚡ Полный анализ")
         ])
 
+    # AI-анализ — для платных пользователей и админов
+    if is_paid or is_admin(user_id):
+        keyboard.append([
+            KeyboardButton(text="🧠 AI-анализ"),
+        ])
+
     # Добавляем кнопки админки для админов
     if is_admin(user_id):
         keyboard.append([
-            KeyboardButton(text="📊 Админка")
+            KeyboardButton(text="🔬 Анализ (2)"),
+            KeyboardButton(text="📋 Большая карточка"),
+            KeyboardButton(text="📊 Админка"),
         ])
 
     return ReplyKeyboardMarkup(
@@ -276,6 +282,54 @@ def set_writing_review(user_id: int) -> None:
 
 def clear_writing_review(user_id: int) -> None:
     _users_writing_review.discard(user_id)
+
+
+# AI analysis mode — отслеживание пользователей, ожидающих ввод канала для AI-анализа
+_users_ai_mode: set[int] = set()
+
+
+def is_ai_mode(user_id: int) -> bool:
+    return user_id in _users_ai_mode
+
+
+def set_ai_mode(user_id: int) -> None:
+    _users_ai_mode.add(user_id)
+
+
+def clear_ai_mode(user_id: int) -> None:
+    _users_ai_mode.discard(user_id)
+
+
+# Analysis v2 mode — ожидание канала для расширенного анализа (архетип + факты)
+_users_analysis2_mode: set[int] = set()
+
+
+def is_analysis2_mode(user_id: int) -> bool:
+    return user_id in _users_analysis2_mode
+
+
+def set_analysis2_mode(user_id: int) -> None:
+    _users_analysis2_mode.add(user_id)
+
+
+def clear_analysis2_mode(user_id: int) -> None:
+    _users_analysis2_mode.discard(user_id)
+
+
+# Big card mode — ожидание канала для большой карточки инсайтов
+_users_bigcard_mode: set[int] = set()
+
+
+def is_bigcard_mode(user_id: int) -> bool:
+    return user_id in _users_bigcard_mode
+
+
+def set_bigcard_mode(user_id: int) -> None:
+    _users_bigcard_mode.add(user_id)
+
+
+def clear_bigcard_mode(user_id: int) -> None:
+    _users_bigcard_mode.discard(user_id)
 
 
 def _get_buy_keyboard(user_id: int = 0) -> InlineKeyboardMarkup:

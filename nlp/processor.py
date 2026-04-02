@@ -34,6 +34,12 @@ from nlp.constants import (
     OBSCENE_FALSE_POSITIVES,
     PERSON_BLACKLIST,
     PHRASE_STOPWORDS,
+    ANIMAL_WORDS,
+    ANIMAL_LEMMA_TO_GROUP,
+    FOOD_WORDS,
+    FOOD_LEMMA_TO_GROUP,
+    CITY_WORDS,
+    CITY_LEMMA_TO_GROUP,
 )
 
 logger = logging.getLogger(__name__)
@@ -331,3 +337,100 @@ def extract_phrases(texts: list[str], n: int = 3) -> list[tuple[tuple[str, ...],
 
     # Возвращаем отсортированный список
     return combined.most_common()
+
+
+def count_animals(texts: list[str]) -> Counter:
+    """
+    Считает упоминания животных в текстах.
+    Использует pymorphy лемматизацию + словарь ANIMAL_WORDS.
+    Группирует синонимы (кот/кошка/котик → 'кот').
+
+    Returns:
+        Counter с каноническими названиями животных.
+    """
+    counter: Counter = Counter()
+
+    for text in texts:
+        text = re.sub(r'http\S+', '', text)
+        words = re.findall(r'[а-яА-ЯёЁ]+', text.lower())
+
+        for word in words:
+            try:
+                parsed = morph.parse(word)[0]
+                lemma = parsed.normal_form
+            except Exception:
+                lemma = word
+
+            if lemma in ANIMAL_WORDS:
+                group = ANIMAL_LEMMA_TO_GROUP.get(lemma, lemma)
+                counter[group] += 1
+
+    return counter
+
+
+def count_food(texts: list[str]) -> Counter:
+    """
+    Считает упоминания еды и напитков в текстах.
+    Группирует синонимы (латте/капучино/эспрессо → 'кофе').
+    """
+    counter: Counter = Counter()
+
+    for text in texts:
+        text = re.sub(r'http\S+', '', text)
+        words = re.findall(r'[а-яА-ЯёЁ]+', text.lower())
+
+        for word in words:
+            try:
+                parsed = morph.parse(word)[0]
+                lemma = parsed.normal_form
+            except Exception:
+                lemma = word
+
+            if lemma in FOOD_WORDS:
+                group = FOOD_LEMMA_TO_GROUP.get(lemma, lemma)
+                counter[group] += 1
+
+    return counter
+
+
+def count_cities(texts: list[str]) -> Counter:
+    """
+    Считает упоминания городов в текстах.
+    Ищет как отдельные слова, так и составные названия (нью-йорк, санкт-петербург).
+    Группирует синонимы (питер/петербург/санкт-петербург → 'петербург').
+    """
+    counter: Counter = Counter()
+
+    for text in texts:
+        text = re.sub(r'http\S+', '', text)
+        text_lower = text.lower()
+
+        # Сначала ищем составные названия (с дефисом и пробелом)
+        for city in CITY_WORDS:
+            if ' ' in city or '-' in city:
+                if city in text_lower:
+                    group = CITY_LEMMA_TO_GROUP.get(city, city)
+                    counter[group] += text_lower.count(city)
+
+        # Потом одиночные слова через лемматизацию
+        words = re.findall(r'[а-яА-ЯёЁ]+(?:-[а-яА-ЯёЁ]+)*', text_lower)
+
+        for word in words:
+            # Для слов с дефисом проверяем как есть
+            if word in CITY_WORDS:
+                group = CITY_LEMMA_TO_GROUP.get(word, word)
+                counter[group] += 1
+                continue
+
+            # Для обычных слов пробуем лемматизацию
+            try:
+                parsed = morph.parse(word)[0]
+                lemma = parsed.normal_form
+            except Exception:
+                lemma = word
+
+            if lemma in CITY_WORDS:
+                group = CITY_LEMMA_TO_GROUP.get(lemma, lemma)
+                counter[group] += 1
+
+    return counter

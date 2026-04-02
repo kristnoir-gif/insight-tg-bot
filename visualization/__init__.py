@@ -1,7 +1,6 @@
 """Модуль визуализации."""
 from visualization.wordclouds import (
     generate_main_cloud,
-    generate_sentiment_cloud,
     generate_mats_cloud,
 )
 from visualization.charts import (
@@ -12,12 +11,12 @@ from visualization.charts import (
     generate_phrases_chart,
     generate_heatmap_chart,
     generate_comparison_chart,
+    generate_mentions_chart,
 )
 from visualization.pdf_export import generate_pdf_report
 
 __all__ = [
     "generate_main_cloud",
-    "generate_sentiment_cloud",
     "generate_mats_cloud",
     "generate_top_words_chart",
     "generate_weekday_chart",
@@ -26,5 +25,6 @@ __all__ = [
     "generate_phrases_chart",
     "generate_heatmap_chart",
     "generate_comparison_chart",
+    "generate_mentions_chart",
     "generate_pdf_report",
 ]

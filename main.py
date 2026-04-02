@@ -218,8 +218,8 @@ async def _send_analysis_result(bot: Bot, user_id: int, result, use_lite: bool, 
         media.append(InputMediaPhoto(media=FSInputFile(result.cloud_path), caption=caption, parse_mode="HTML"))
 
     optional_paths = [
-        result.graph_path, result.mats_path, result.positive_path,
-        result.aggressive_path, result.weekday_path, result.hour_path,
+        result.graph_path, result.mats_path, result.sentiment_path,
+        result.weekday_path, result.hour_path,
         result.names_path, result.phrases_path, result.dichotomy_path,
     ]
     for path in optional_paths:

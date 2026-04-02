@@ -106,7 +106,7 @@ class TestNamesChart:
 
     def test_too_few_names_returns_none(self, tmp_path):
         os.chdir(tmp_path)
-        names = [("Пушкин", 5), ("Толстой", 3)]  # Only 2, minimum is 3
+        names = [("Пушкин", 5)]  # Only 1, minimum is 2
         path = generate_names_chart("testuser", names, "Few Names")
         assert path is None
 

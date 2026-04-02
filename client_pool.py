@@ -12,7 +12,7 @@ from telethon import TelegramClient
 from telethon.errors import FloodWaitError
 
 from analyzer import analyze_channel, analyze_channel_web, AnalysisResult, AnalysisError
-from config import CACHE_TTL_LITE, CACHE_TTL_FULL, MAX_CONCURRENT_ANALYSES
+from config import CACHE_TTL_LITE, CACHE_TTL_FULL, MAX_CONCURRENT_ANALYSES, API_ID, API_HASH
 
 logger = logging.getLogger(__name__)
 
@@ -155,12 +155,11 @@ class ClientPool:
         self._accounts.append(account)
         logger.info(f"Added account to pool: {name}")
 
-    def get_account_by_name(self, name: str) -> Optional[ClientAccount]:
-        """Получает аккаунт по имени."""
-        for acc in self._accounts:
-            if acc.name == name:
-                return acc
-        return None
+    @staticmethod
+    def _normalize_channel_key(channel: str | int) -> str:
+        """Нормализует ключ канала для кэша: lowercase, без @, без t.me/."""
+        key = str(channel).strip().lower().lstrip("@").split("/")[-1].strip()
+        return key
 
     def _select_best_account(self) -> Optional[ClientAccount]:
         """
@@ -196,6 +195,7 @@ class ClientPool:
         is_private: bool = False,
         lite_mode: bool = False,
         message_limit: int = 400,
+        enable_llm: bool = False,
     ) -> tuple[AnalysisResult | None, str | None]:
         """
         Выполняет анализ канала с балансировкой и кэшированием.
@@ -259,7 +259,8 @@ class ClientPool:
                                 channel,
                                 limit=message_limit,
                                 is_private=is_private,
-                                lite_mode=lite_mode
+                                lite_mode=lite_mode,
+                                enable_llm=enable_llm,
                             ),
                             timeout=180,
                         )
@@ -323,7 +324,7 @@ class ClientPool:
                 if channel_str and not channel_str.startswith('+') and not channel_str.isdigit():
                     logger.info(f"All accounts unavailable, trying web fallback for {channel_str}")
                     try:
-                        result = await analyze_channel_web(channel_str, limit=message_limit, lite_mode=lite_mode)
+                        result = await analyze_channel_web(channel_str, limit=message_limit, lite_mode=lite_mode, enable_llm=enable_llm)
                         if result and result.cloud_path:
                             result.from_cache = False
                             logger.info(f"Web fallback succeeded for {channel_str}")

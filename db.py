@@ -805,6 +805,31 @@ def get_queue_position(user_id: int, channel_key: str) -> int:
         return 0
 
 
+def get_pending_count() -> int:
+    """Возвращает общее количество pending анализов в очереди."""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM pending_analyses WHERE status = 'pending'")
+            return cursor.fetchone()[0] or 0
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка получения количества pending: {e}")
+        return 0
+
+
+def get_user_analysis_count(user_id: int) -> int:
+    """Возвращает общее количество выполненных анализов пользователя."""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT request_count FROM users WHERE user_id = ?", (user_id,))
+            row = cursor.fetchone()
+            return (row[0] or 0) if row else 0
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка получения кол-ва анализов: {e}")
+        return 0
+
+
 def get_queue_stats() -> dict:
     """
     Возвращает статистику очереди.

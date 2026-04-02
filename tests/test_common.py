@@ -38,7 +38,8 @@ def test_rate_limit_blocks_rapid_request():
     assert wait > 0
 
 
-def test_rate_limit_allows_after_expiry():
+@patch("handlers.common.get_user_analysis_count", return_value=1)
+def test_rate_limit_allows_after_expiry(_mock):
     """Request after rate limit period should be allowed."""
     _clear_rate_limits()
     _user_last_request[12345] = time.time() - RATE_LIMIT_SECONDS - 1
@@ -88,6 +89,28 @@ def test_cleanup_rate_limits():
     assert 222 in _user_last_request
     assert 444 in _user_got_floodwait
     _clear_rate_limits()
+
+
+@patch("handlers.common.get_user_analysis_count", return_value=0)
+def test_new_user_higher_rate_limit(_mock):
+    """New users (0 analyses) should have RATE_LIMIT_NEW_USER_SECONDS."""
+    from config import RATE_LIMIT_NEW_USER_SECONDS
+    _clear_rate_limits()
+    # Ставим последний запрос чуть больше RATE_LIMIT_SECONDS назад,
+    # но меньше RATE_LIMIT_NEW_USER_SECONDS — новый юзер всё ещё заблокирован
+    _user_last_request[99999] = time.time() - RATE_LIMIT_SECONDS - 1
+    can_proceed, wait = _check_rate_limit(99999)
+    assert can_proceed is False
+    assert wait > 0
+
+
+@patch("handlers.common.get_user_analysis_count", return_value=1)
+def test_existing_user_normal_rate_limit(_mock):
+    """Existing users (>=1 analysis) should have RATE_LIMIT_SECONDS."""
+    _clear_rate_limits()
+    _user_last_request[99998] = time.time() - RATE_LIMIT_SECONDS - 1
+    can_proceed, wait = _check_rate_limit(99998)
+    assert can_proceed is True
 
 
 def test_check_and_update_rate_limit_atomic():

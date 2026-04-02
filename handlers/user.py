@@ -6,7 +6,7 @@ import logging
 import html
 from datetime import datetime
 
-from aiogram import Router, types, F, Bot
+from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import FSInputFile, InputMediaPhoto
@@ -26,6 +26,7 @@ from db import (
     add_pending_analysis,
     get_user_pending_queue,
     get_queue_position,
+    get_pending_count,
 )
 from handlers.common import (
     _check_access,
@@ -43,13 +44,21 @@ from handlers.common import (
     is_writing_review,
     set_writing_review,
     clear_writing_review,
+    is_ai_mode,
+    set_ai_mode,
+    clear_ai_mode,
+    is_analysis2_mode,
+    set_analysis2_mode,
+    clear_analysis2_mode,
+    is_bigcard_mode,
+    set_bigcard_mode,
+    clear_bigcard_mode,
     send_media_group_chunked,
 )
 
 logger = logging.getLogger(__name__)
 
 router = Router()
-
 
 @router.message(Command("start"))
 async def cmd_start(message: types.Message) -> None:
@@ -62,23 +71,28 @@ async def cmd_start(message: types.Message) -> None:
 
     await message.answer(
         "📊 *Добро пожаловать в Insight Bot!*\n\n"
-        "Я анализирую публичные Telegram-каналы и выворачиваю их смыслы наизнанку.\n\n"
+        "Я анализирую Telegram-каналы и выворачиваю их смыслы наизнанку.\n\n"
         "*Как пользоваться:*\n"
         "Отправьте юзернейм: `polozhnyak`\n"
         "Или ссылку: `t.me/polozhnyak`\n\n"
         "🆓 *Бесплатно:*\n"
-        "📊 Облако ключевых слов\n"
+        "☁️ Облако ключевых слов\n"
         "📈 Топ-15 слов канала\n\n"
         "💎 *Полный анализ (за ⭐):*\n"
         "🤬 Мат-облако\n"
-        "😊 Облако позитива\n"
-        "😡 Облако агрессии\n"
+        "😊😡 Тональность (позитив vs негатив)\n"
         "🗓 Активность по дням недели\n"
         "🕐 Время публикаций\n"
+        "🔥 Тепловая карта активности\n"
         "👤 Упоминаемые личности\n"
         "💬 Популярные фразы\n"
+        "📝 Стиль речи (формальный vs разговорный)\n"
+        "🔮 Метафизика vs быт\n"
+        "🎭 Архетип канала\n"
         "😀 Топ эмодзи\n"
-        "🔮 Дихотомия языка — метафизика vs быт",
+        "🐾 Упоминания животных\n"
+        "🍕 Еда и напитки\n"
+        "🏙 Города",
         parse_mode="Markdown",
         reply_markup=_get_main_keyboard(user.id),
     )
@@ -97,23 +111,27 @@ async def cmd_help(message: types.Message) -> None:
         "Или ссылку: `t.me/polozhnyak`\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         "🆓 *Бесплатный анализ:*\n"
-        "📊 Облако ключевых слов\n"
+        "☁️ Облако ключевых слов\n"
         "📈 Топ-15 слов канала\n"
         "📏 Базовая статистика\n\n"
         "💎 *Полный анализ (за ⭐):*\n"
         "Всё из бесплатного, плюс:\n"
         "🤬 Мат-облако\n"
-        "😊 Облако позитива\n"
-        "😡 Облако агрессии\n"
+        "😊😡 Тональность (позитив vs негатив)\n"
         "🗓 Активность по дням\n"
         "🕐 Время публикаций\n"
+        "🔥 Тепловая карта активности\n"
         "👤 Упоминаемые личности\n"
         "💬 Популярные фразы\n"
-        "😀 Топ-20 эмодзи\n"
-        "🔮 Дихотомия языка — метафизика vs быт\n"
+        "📝 Стиль речи (формальный vs разговорный)\n"
+        "🔮 Метафизика vs быт\n"
+        "🎭 Архетип канала\n"
+        "😀 Топ эмодзи\n"
+        "🐾 Упоминания животных\n"
+        "🍕 Еда и напитки\n"
+        "🏙 Города\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
         "*Команды:*\n"
-        "/compare @ch1 @ch2 — сравнить два канала\n"
         "/buy — купить полные анализы\n"
         "/balance — ваш баланс\n"
         "/queue — статус очереди",
@@ -165,12 +183,15 @@ async def cmd_queue(message: types.Message) -> None:
         )
         return
 
+    pool = get_client_pool()
+    num_accounts = max(pool.status()['total_accounts'], 1)
+
     text = "📋 *Ваши анализы в очереди:*\n\n"
 
     for i, item in enumerate(pending, 1):
         position = item["position"]
         channel = item["channel_username"]
-        est_time = position * 1.5  # ~1.5 мин на анализ
+        est_time = position * 1.5 / num_accounts  # ~1.5 мин на анализ / кол-во аккаунтов
 
         priority_icon = ""
         if item["priority"] == 2:
@@ -308,6 +329,8 @@ async def cmd_compare(message: types.Message) -> None:
         return
 
     user = message.from_user
+    if not is_admin(user.id):
+        return
     register_user(user.id, user.username)
 
     # Парсим аргументы: /compare @ch1 @ch2 или /compare ch1 ch2 или t.me/ch1 t.me/ch2
@@ -544,12 +567,185 @@ async def handle_review_button(message: types.Message) -> None:
 
 @router.message(F.text == "❌ Отмена")
 async def handle_cancel_review(message: types.Message) -> None:
-    """Обработчик отмены отзыва."""
+    """Обработчик отмены отзыва/AI-анализа/analysis2."""
     clear_writing_review(message.from_user.id)
+    clear_ai_mode(message.from_user.id)
+    clear_analysis2_mode(message.from_user.id)
     await message.answer(
         "Отменено.",
         reply_markup=_get_main_keyboard(message.from_user.id),
     )
+
+
+@router.message(F.text == "🔬 Анализ (2)")
+async def handle_analysis2_button(message: types.Message) -> None:
+    """Кнопка расширенного анализа (архетип + факты) — только для админа."""
+    user = message.from_user
+    if not is_admin(user.id):
+        return
+
+    set_analysis2_mode(user.id)
+    await message.answer(
+        "🔬 <b>Анализ (2): Архетип + Факты</b>\n\n"
+        "Отправьте юзернейм канала:\n"
+        "<code>polozhnyak</code> или <code>t.me/polozhnyak</code>\n\n"
+        "Я определю архетип канала и найду интересные факты.\n"
+        "Для отмены нажмите /cancel",
+        parse_mode="HTML",
+        reply_markup=types.ReplyKeyboardMarkup(
+            keyboard=[[types.KeyboardButton(text="❌ Отмена")]],
+            resize_keyboard=True,
+            one_time_keyboard=True,
+        ),
+    )
+
+
+@router.message(F.text == "📋 Большая карточка")
+async def handle_bigcard_button(message: types.Message) -> None:
+    """Кнопка большой карточки инсайтов — только для админа."""
+    user = message.from_user
+    if not is_admin(user.id):
+        return
+
+    set_bigcard_mode(user.id)
+    await message.answer(
+        "📋 <b>Большая карточка: Инсайты канала</b>\n\n"
+        "Отправьте юзернейм канала:\n"
+        "<code>polozhnyak</code> или <code>t.me/polozhnyak</code>\n\n"
+        "Я создам инфографику со всеми выводами.\n"
+        "Для отмены нажмите /cancel",
+        parse_mode="HTML",
+        reply_markup=types.ReplyKeyboardMarkup(
+            keyboard=[[types.KeyboardButton(text="❌ Отмена")]],
+            resize_keyboard=True,
+            one_time_keyboard=True,
+        ),
+    )
+
+
+@router.message(F.text == "🧠 AI-анализ")
+async def handle_ai_analysis_button(message: types.Message) -> None:
+    """Кнопка AI-анализа — переводит в режим ожидания канала."""
+    user = message.from_user
+
+    # Проверяем доступ (платный или админ)
+    access = check_user_access(user.id)
+    is_paid = access.paid_balance > 0 or access.is_premium or is_admin(user.id)
+
+    if not is_paid:
+        await message.answer(
+            "📊 <b>AI-анализ контента канала</b>\n\n"
+            "Эта функция доступна за ⭐\n"
+            "Купите анализы чтобы получить развёрнутый анализ контента канала:",
+            parse_mode="HTML",
+            reply_markup=_get_buy_keyboard(),
+        )
+        return
+
+    set_ai_mode(user.id)
+    await message.answer(
+        "📊 <b>AI-анализ контента канала</b>\n\n"
+        "Отправьте юзернейм канала:\n"
+        "<code>polozhnyak</code> или <code>t.me/polozhnyak</code>\n\n"
+        "Я составлю развёрнутый анализ контента.\n"
+        "Для отмены нажмите /cancel",
+        parse_mode="HTML",
+        reply_markup=types.ReplyKeyboardMarkup(
+            keyboard=[[types.KeyboardButton(text="❌ Отмена")]],
+            resize_keyboard=True,
+            one_time_keyboard=True,
+        ),
+    )
+
+
+@router.callback_query(F.data.startswith("content_analysis:"))
+async def callback_content_analysis(callback: types.CallbackQuery) -> None:
+    """Отправляет AI-анализ контента канала из кэша (только для админов)."""
+    await callback.answer()
+
+    if not is_admin(callback.from_user.id):
+        return
+
+    channel_key = callback.data.split(":", 1)[1]
+
+    from analyzer import _load_from_cache, _is_cache_valid
+    if not _is_cache_valid(channel_key):
+        await callback.message.answer("❌ Кэш анализа истёк. Запустите анализ заново.")
+        return
+
+    cached = _load_from_cache(channel_key, require_full=True)
+    if not cached or not cached.content_analysis_text:
+        await callback.message.answer("❌ Анализ контента не найден. Запустите анализ заново.")
+        if cached:
+            cleanup_analysis_files(cached)
+        return
+
+    content_text = cached.content_analysis_text
+    cleanup_analysis_files(cached)
+
+    header = "📊 <b>AI-анализ контента канала</b>\n\n"
+    full_text = header + content_text
+    _MAX_MSG = 4096
+    if len(full_text) <= _MAX_MSG:
+        await callback.message.answer(full_text, parse_mode="HTML")
+    else:
+        parts = []
+        current = ""
+        for block in full_text.split("\n\n"):
+            if len(current) + len(block) + 2 > _MAX_MSG:
+                if current:
+                    parts.append(current)
+                current = block
+            else:
+                current = current + "\n\n" + block if current else block
+        if current:
+            parts.append(current)
+        for part in parts:
+            await callback.message.answer(part.strip(), parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("personality:"))
+async def callback_personality(callback: types.CallbackQuery) -> None:
+    """Отправляет AI-анализ личности автора из кэша."""
+    await callback.answer()
+
+    channel_key = callback.data.split(":", 1)[1]
+
+    from analyzer import _load_from_cache, _is_cache_valid
+    if not _is_cache_valid(channel_key):
+        await callback.message.answer("❌ Кэш анализа истёк. Запустите анализ заново.")
+        return
+
+    cached = _load_from_cache(channel_key, require_full=True)
+    if not cached or not cached.personality_text:
+        await callback.message.answer("❌ AI-анализ не найден. Запустите анализ заново.")
+        # Удаляем временные файлы от кэша
+        if cached:
+            cleanup_analysis_files(cached)
+        return
+
+    personality = cached.personality_text
+    cleanup_analysis_files(cached)
+
+    header = "🧠 <b>AI-анализ личности автора канала</b>\n\n"
+    full_text = header + personality
+    _MAX_MSG = 4096
+    if len(full_text) <= _MAX_MSG:
+        await callback.message.answer(full_text, parse_mode="HTML")
+    else:
+        parts = []
+        current = ""
+        for block in full_text.split("\n\n"):
+            if len(current) + len(block) + 2 > _MAX_MSG:
+                if current:
+                    parts.append(current)
+                current = block
+            else:
+                current = current + "\n\n" + block if current else block
+        if current:
+            parts.append(current)
+        for part in parts:
+            await callback.message.answer(part.strip(), parse_mode="HTML")
 
 
 @router.message(F.text)
@@ -583,6 +779,24 @@ async def handle_msg(message: types.Message) -> None:
         )
         return
 
+    # Перехват AI-анализа
+    if is_ai_mode(user.id):
+        clear_ai_mode(user.id)
+        await _perform_ai_analysis(message)
+        return
+
+    # Перехват Анализ (2)
+    if is_analysis2_mode(user.id):
+        clear_analysis2_mode(user.id)
+        await _perform_analysis2(message)
+        return
+
+    # Перехват Большая карточка
+    if is_bigcard_mode(user.id):
+        clear_bigcard_mode(user.id)
+        await _perform_bigcard(message)
+        return
+
     # Регистрируем пользователя
     register_user(user.id, user.username)
 
@@ -613,6 +827,347 @@ async def handle_msg(message: types.Message) -> None:
 
     # Выполняем анализ
     await _perform_analysis(message, username, is_private_channel)
+
+
+async def _perform_ai_analysis(message: types.Message) -> None:
+    """
+    Standalone AI-анализ: собирает посты канала → отправляет в LLM → возвращает текстовый портрет.
+    """
+    user = message.from_user
+
+    # Извлекаем username из текста
+    raw = message.text.replace('@', '').strip()
+    if 't.me/' in raw:
+        raw = raw.split('t.me/')[-1]
+    channel = raw.split('?')[0].split('/')[0].strip()
+
+    if not channel or channel.startswith('+'):
+        await message.answer(
+            "❌ Отправьте юзернейм публичного канала.",
+            reply_markup=_get_main_keyboard(user.id),
+        )
+        return
+
+    # Rate limit
+    can_proceed, wait_seconds = await check_and_update_rate_limit(user.id)
+    if not can_proceed:
+        await message.answer(f"⏳ Подождите {format_wait_time(wait_seconds)} перед следующим запросом.")
+        return
+
+    status_msg = await message.answer("📊 Анализирую контент канала... Это займёт 30-60 секунд")
+
+    try:
+        from analyzer import fetch_channel_posts, _run_analysis_pipeline
+        from llm import generate_content_analysis
+        from config import DEFAULT_MESSAGE_LIMIT
+
+        # Собираем посты через веб-парсинг
+        result = await fetch_channel_posts(channel, limit=DEFAULT_MESSAGE_LIMIT)
+
+        if not result:
+            await status_msg.delete()
+            await message.answer(
+                "❌ Канал не найден или пуст.",
+                reply_markup=_get_main_keyboard(user.id),
+            )
+            return
+
+        title, subscribers, texts = result
+
+        # Собираем базовую статистику для промта
+        from nlp.processor import get_clean_words
+        from nlp.constants import positive_words, aggressive_words, METAPHYSICS_WORDS, EVERYDAY_WORDS
+        from collections import Counter
+        import numpy as np
+
+        all_words = []
+        pos_words_list = []
+        agg_words_list = []
+        meta_words_list = []
+        everyday_list = []
+        all_emojis_list = []
+        from nlp.processor import extract_emojis
+
+        for text in texts:
+            clean = get_clean_words(text, 'normal')
+            all_words.extend(clean)
+            pos_words_list.extend(w for w in clean if w in positive_words)
+            agg_words_list.extend(w for w in clean if w in aggressive_words)
+            meta_words_list.extend(w for w in clean if w in METAPHYSICS_WORDS)
+            everyday_list.extend(w for w in clean if w in EVERYDAY_WORDS)
+            all_emojis_list.extend(extract_emojis(text))
+
+        word_counter = Counter(all_words)
+        emoji_freq = Counter(all_emojis_list)
+        top10_words = ", ".join(w for w, _ in word_counter.most_common(10))
+        top5_emojis_str = ", ".join(f"{e} x{c}" for e, c in emoji_freq.most_common(5))
+
+        sentiment_total = len(pos_words_list) + len(agg_words_list)
+        pos_pct = (len(pos_words_list) / sentiment_total * 100) if sentiment_total else 0
+        agg_pct = (len(agg_words_list) / sentiment_total * 100) if sentiment_total else 0
+        dich_total = len(meta_words_list) + len(everyday_list)
+        meta_pct = (len(meta_words_list) / dich_total * 100) if dich_total else 0
+        every_pct = (len(everyday_list) / dich_total * 100) if dich_total else 0
+
+        stats_text = (
+            f"Постов: {len(texts)}\n"
+            f"Подписчики: {subscribers}\n"
+            f"Средняя длина поста: {round(np.mean([len(t.split()) for t in texts]), 1)} слов\n"
+            f"Уникальных слов: {len(set(all_words))}\n"
+            f"ТОП-10 слов: {top10_words}\n"
+            f"ТОП эмодзи: {top5_emojis_str}\n"
+            f"Позитивных слов: {pos_pct:.0f}% | Агрессивных: {agg_pct:.0f}%\n"
+            f"Метафизика: {meta_pct:.0f}% | Быт: {every_pct:.0f}%"
+        )
+
+        # Отправляем в LLM
+        content_result = await generate_content_analysis(title, subscribers, stats_text, texts)
+
+        if not content_result:
+            await status_msg.delete()
+            await message.answer(
+                "❌ Не удалось сгенерировать AI-анализ. Попробуйте позже.",
+                reply_markup=_get_main_keyboard(user.id),
+            )
+            return
+
+        # Списываем анализ
+        access = check_user_access(user.id)
+        consume_analysis(user.id, access.reason)
+
+        # Отправляем результат
+        safe_title = html.escape(title)
+        header = f"📊 <b>AI-анализ контента канала {safe_title}</b>\n\n"
+        full_text = header + content_result
+
+        _MAX_MSG = 4096
+        if len(full_text) <= _MAX_MSG:
+            await message.answer(full_text, parse_mode="HTML", reply_markup=_get_main_keyboard(user.id))
+        else:
+            # Разбиваем на части по абзацам
+            parts = []
+            current = ""
+            for block in full_text.split("\n\n"):
+                if len(current) + len(block) + 2 > _MAX_MSG:
+                    if current:
+                        parts.append(current)
+                    current = block
+                else:
+                    current = current + "\n\n" + block if current else block
+            if current:
+                parts.append(current)
+            for i, part in enumerate(parts):
+                kb = _get_main_keyboard(user.id) if i == len(parts) - 1 else None
+                await message.answer(part.strip(), parse_mode="HTML", reply_markup=kb)
+
+        logger.info(f"AI-анализ канала {channel} отправлен пользователю {user.id}")
+
+    except Exception as e:
+        logger.exception(f"Ошибка AI-анализа канала {channel}")
+        await notify_admin_error(
+            "Ошибка AI-анализа",
+            f"📺 Канал: `{channel}`\n👤 User: {user.id}\n💥 `{type(e).__name__}: {str(e)[:200]}`"
+        )
+        await message.answer(
+            "❌ Произошла ошибка. Попробуйте позже.",
+            reply_markup=_get_main_keyboard(user.id),
+        )
+
+    finally:
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+
+
+async def _perform_analysis2(message: types.Message) -> None:
+    """
+    Анализ (2): архетип канала + fun facts.
+    Веб-парсинг → full pipeline с архетипом → карточка + факты.
+    """
+    user = message.from_user
+
+    # Извлекаем username
+    raw = message.text.replace('@', '').strip()
+    if 't.me/' in raw:
+        raw = raw.split('t.me/')[-1]
+    channel = raw.split('?')[0].split('/')[0].strip()
+
+    if not channel or channel.startswith('+'):
+        await message.answer(
+            "❌ Отправьте юзернейм публичного канала.",
+            reply_markup=_get_main_keyboard(user.id),
+        )
+        return
+
+    # Rate limit
+    can_proceed, wait_seconds = await check_and_update_rate_limit(user.id)
+    if not can_proceed:
+        await message.answer(f"⏳ Подождите {format_wait_time(wait_seconds)} перед следующим запросом.")
+        return
+
+    status_msg = await message.answer("🔬 Анализирую канал... Это займёт 15-30 секунд")
+
+    try:
+        # Full анализ через веб-парсинг (архетип генерируется в pipeline)
+        result = await analyze_channel_web(channel, limit=300, lite_mode=False)
+
+        if not result or not result.cloud_path:
+            await status_msg.delete()
+            await message.answer(
+                "❌ Канал не найден или пуст.",
+                reply_markup=_get_main_keyboard(user.id),
+            )
+            return
+
+        # Отправляем карточку архетипа
+        media = []
+        if result.archetype_path and os.path.exists(result.archetype_path):
+            archetype_caption = f"🔬 <b>Архетип канала {html.escape(result.title)}</b>"
+            media.append(InputMediaPhoto(
+                media=FSInputFile(result.archetype_path),
+                caption=archetype_caption,
+                parse_mode="HTML",
+            ))
+
+        # Карточка тем
+        if result.topics_path and os.path.exists(result.topics_path):
+            media.append(InputMediaPhoto(media=FSInputFile(result.topics_path)))
+
+        # Облако + топ слов для контекста
+        if result.cloud_path and os.path.exists(result.cloud_path):
+            media.append(InputMediaPhoto(media=FSInputFile(result.cloud_path)))
+        if result.graph_path and os.path.exists(result.graph_path):
+            media.append(InputMediaPhoto(media=FSInputFile(result.graph_path)))
+        if result.heatmap_path and os.path.exists(result.heatmap_path):
+            media.append(InputMediaPhoto(media=FSInputFile(result.heatmap_path)))
+
+        if media:
+            await send_media_group_chunked(message, media)
+
+        # Инсайты по графикам
+        if result.insights:
+            safe_title = html.escape(result.title)
+            insights_text = f"🔍 <b>Инсайты по каналу {safe_title}</b>\n\n"
+            for insight in result.insights:
+                insights_text += f"{insight}\n"
+            await message.answer(insights_text, parse_mode="HTML")
+
+        # Fun facts текстом
+        if result.fun_facts:
+            safe_title = html.escape(result.title)
+            facts_text = f"💡 <b>Факты о канале {safe_title}</b>\n\n"
+            for fact in result.fun_facts:
+                facts_text += f"• {fact}\n"
+
+            if result.topics:
+                facts_text += f"\n📌 Темы: <b>{', '.join(result.topics)}</b>"
+
+            if result.archetype_name:
+                facts_text += f"\n🏷 Архетип: <b>{result.archetype_name}</b>"
+
+            await message.answer(facts_text, parse_mode="HTML",
+                                 reply_markup=_get_main_keyboard(user.id))
+        else:
+            await message.answer(
+                "Анализ завершён, но фактов не найдено.",
+                reply_markup=_get_main_keyboard(user.id),
+            )
+
+        # Cleanup
+        cleanup_analysis_files(result)
+        logger.info(f"Анализ (2) канала {channel} для admin {user.id}")
+
+    except Exception as e:
+        logger.exception(f"Ошибка Анализ (2) для канала {channel}")
+        await message.answer(
+            "❌ Произошла ошибка. Попробуйте позже.",
+            reply_markup=_get_main_keyboard(user.id),
+        )
+    finally:
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+
+
+async def _perform_bigcard(message: types.Message) -> None:
+    """
+    Большая карточка: инфографика со всеми инсайтами канала.
+    Веб-парсинг → full pipeline → карточка инсайтов.
+    """
+    user = message.from_user
+
+    # Извлекаем username
+    raw = message.text.replace('@', '').strip()
+    if 't.me/' in raw:
+        raw = raw.split('t.me/')[-1]
+    channel = raw.split('?')[0].split('/')[0].strip()
+
+    if not channel or channel.startswith('+'):
+        await message.answer(
+            "❌ Отправьте юзернейм публичного канала.",
+            reply_markup=_get_main_keyboard(user.id),
+        )
+        return
+
+    # Rate limit
+    can_proceed, wait_seconds = await check_and_update_rate_limit(user.id)
+    if not can_proceed:
+        await message.answer(f"⏳ Подождите {format_wait_time(wait_seconds)} перед следующим запросом.")
+        return
+
+    status_msg = await message.answer("📋 Создаю большую карточку... Это займёт 15-30 секунд")
+
+    try:
+        result = await analyze_channel_web(channel, limit=300, lite_mode=False)
+
+        if not result or not result.cloud_path:
+            await status_msg.delete()
+            await message.answer(
+                "❌ Канал не найден или пуст.",
+                reply_markup=_get_main_keyboard(user.id),
+            )
+            return
+
+        # Отправляем карточку инсайтов
+        if result.insights_path and os.path.exists(result.insights_path):
+            await message.answer_photo(
+                FSInputFile(result.insights_path),
+                caption=f"📋 <b>Инсайты канала {html.escape(result.title)}</b>",
+                parse_mode="HTML",
+                reply_markup=_get_main_keyboard(user.id),
+            )
+        else:
+            # Фоллбэк — текстом
+            if result.insights:
+                safe_title = html.escape(result.title)
+                insights_text = f"🔍 <b>Инсайты канала {safe_title}</b>\n\n"
+                for insight in result.insights:
+                    insights_text += f"{insight}\n"
+                await message.answer(insights_text, parse_mode="HTML",
+                                     reply_markup=_get_main_keyboard(user.id))
+            else:
+                await message.answer(
+                    "❌ Не удалось сгенерировать инсайты.",
+                    reply_markup=_get_main_keyboard(user.id),
+                )
+
+        # Cleanup
+        cleanup_analysis_files(result)
+        logger.info(f"Большая карточка канала {channel} для admin {user.id}")
+
+    except Exception as e:
+        logger.exception(f"Ошибка Большая карточка для канала {channel}")
+        await message.answer(
+            "❌ Произошла ошибка. Попробуйте позже.",
+            reply_markup=_get_main_keyboard(user.id),
+        )
+    finally:
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
 
 
 async def _perform_analysis(message: types.Message, channel: str | int, is_private: bool = False) -> None:
@@ -667,10 +1222,14 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
     use_lite_mode = is_free_user
     msg_limit = FREE_MESSAGE_LIMIT if use_lite_mode else DEFAULT_MESSAGE_LIMIT
 
-    # Бесплатные пользователи — веб-парсинг напрямую (освобождаем Telethon для платных)
-    if is_free_user and not is_private:
-        channel_str = str(channel).lstrip('@').split('/')[-1].strip()
+    # AI-анализ личности — пока только для админа
+    use_llm = is_admin(user.id)
 
+    channel_str = str(channel).lstrip('@').split('/')[-1].strip()
+
+    # Маршрутизация анализа
+    if is_free_user and not is_private:
+        # Бесплатные пользователи — веб-парсинг напрямую (освобождаем Telethon для платных)
         # Проверяем что это публичный канал (не инвайт, не ID)
         if channel_str and not channel_str.startswith('+') and not channel_str.isdigit():
             status_msg = await message.answer("🛸 Создаю облако слов... Это займёт 10-15 секунд")
@@ -702,7 +1261,8 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
             user_id=user.id,
             is_private=is_private,
             lite_mode=use_lite_mode,
-            message_limit=msg_limit
+            message_limit=msg_limit,
+            enable_llm=use_llm,
         )
 
     try:
@@ -747,8 +1307,9 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
                 channel_key = str(channel).lstrip('@').split('/')[-1].strip().lower()
                 position = add_pending_analysis(user.id, channel_key, str(channel), priority)
 
-                # Рассчитываем примерное время ожидания
-                est_time = position * 1.5  # ~1.5 мин на анализ
+                # Рассчитываем примерное время ожидания: позиция × среднее_время / кол-во_аккаунтов
+                num_accounts = max(pool.status()['total_accounts'], 1)
+                est_time = position * 1.5 / num_accounts  # ~1.5 мин на анализ / 3 аккаунта
 
                 priority_text = ""
                 if priority == 2:
@@ -793,11 +1354,7 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
                     "Это может быть:\n"
                     "• 🤖 Канал, управляемый ботом\n"
                     "• 🔒 Канал со специальными настройками безопасности\n"
-                    "• 🔐 Служебный или закрытый канал\n\n"
-                    "⚠️ *К сожалению, Telegram не позволяет анализировать такие каналы.*\n\n"
-                    "💡 *Рекомендация:*\n"
-                    "Попробуйте анализировать другой публичный канал. "
-                    "Обычно это любой открытый канал без специальных ограничений.",
+                    "• 🔐 Канал, заблокированный Telegram",
                     parse_mode="Markdown",
                 )
             elif "private" in error.lower() or "приватн" in error.lower():
@@ -813,9 +1370,9 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
                     )
                 else:
                     await message.answer(
-                        "🔒 *Канал приватный*\n\n"
-                        "Бот может анализировать только публичные каналы или приватные через ссылку-приглашение.\n\n"
-                        "Отправьте ссылку вида: https://t.me/+xxxxx",
+                        "🔒 *Это приватный канал*\n\n"
+                        "Бот может анализировать только публичные каналы.\n"
+                        "Отправьте юзернейм публичного канала.",
                         parse_mode="Markdown",
                     )
             elif error == "empty_result":
@@ -867,17 +1424,20 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
             media.append(InputMediaPhoto(media=FSInputFile(result.cloud_path), caption=caption, parse_mode="HTML"))
 
         optional_paths = [
-            result.graph_path, result.mats_path, result.positive_path,
-            result.aggressive_path, result.weekday_path, result.hour_path,
+            result.graph_path, result.mats_path, result.sentiment_path,
+            result.weekday_path, result.hour_path,
             result.names_path, result.phrases_path, result.dichotomy_path,
+            result.mentions_path,
         ]
         for path in optional_paths:
             if path and os.path.exists(path):
                 media.append(InputMediaPhoto(media=FSInputFile(path)))
 
-        # Тепловая карта — только для админа (тестовый режим)
-        if is_admin(user.id) and result.heatmap_path and os.path.exists(result.heatmap_path):
+        # Тепловая карта — для всех платных пользователей
+        if result.heatmap_path and os.path.exists(result.heatmap_path):
             media.append(InputMediaPhoto(media=FSInputFile(result.heatmap_path)))
+
+        # Карточка архетипа убрана из основного flow — доступна через кнопку "Анализ (2)"
 
         if not media:
             await message.answer("Не удалось сформировать изображения для анализа. Попробуйте ещё раз.")
@@ -897,7 +1457,9 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
         if use_lite_mode:
             await message.answer(
                 "💎 <b>Хотите полный анализ?</b>\n\n"
-                "В полной версии:\n"
+                "🧠 <b>AI-анализ личности автора</b> — "
+                "психологический портрет, ценности и стиль коммуникации\n\n"
+                "А также:\n"
                 "• Анализ тональности (позитив/агрессия)\n"
                 "• Мат-облако\n"
                 "• Активность по дням и часам\n"
@@ -915,6 +1477,24 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
                 for emo, count in result.top_emojis:
                     emoji_text += f"{emo} x {count}\n"
                 await message.answer(emoji_text)
+
+            # Fun facts убраны из основного flow — доступны через кнопку "Анализ (2)"
+
+            # Кнопка AI-анализа контента (только для админов, результат уже в кэше)
+            if result.content_analysis_text and is_admin(user.id):
+                channel_key = str(channel).lstrip('@').split('/')[-1].strip().lower()
+                kb = types.InlineKeyboardMarkup(inline_keyboard=[[
+                    types.InlineKeyboardButton(
+                        text="📊 AI-анализ контента канала",
+                        callback_data=f"content_analysis:{channel_key}",
+                    )
+                ]])
+                await message.answer(
+                    "📊 <b>Доступен AI-анализ контента</b>\n\n"
+                    "Нажмите кнопку для получения результата:",
+                    parse_mode="HTML",
+                    reply_markup=kb,
+                )
 
         mode_str = "lite" if use_lite_mode else "full"
         logger.info(f"Анализ канала {channel} ({mode_str}) успешно отправлен пользователю {user.id}")

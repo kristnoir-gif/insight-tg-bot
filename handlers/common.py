@@ -47,7 +47,7 @@ async def send_media_group_chunked(target, media: list, bot: "Bot | None" = None
             await bot.send_media_group(chat_id=chat_id, media=chunk)
 
 # Цены (Telegram Stars)
-PRICES = {'pack_1': 50, 'pack_3': 100, 'pack_10': 250}
+PRICES = {'pack_1': 50, 'pack_3': 100}
 SUPPORT_PRICE = 100  # Поддержка проекта
 
 
@@ -224,11 +224,18 @@ def _get_emotional_tone(scream_index: float) -> str:
         return "Взрывной"
 
 
+BETA_DESIGN_BTN_ON  = "🎨 Бета-дизайн: ВКЛ"
+BETA_DESIGN_BTN_OFF = "🎨 Бета-дизайн: ВЫКЛ"
+
+
 def _get_main_keyboard(user_id: int = 0) -> ReplyKeyboardMarkup:
     """Создаёт основную клавиатуру."""
+    from db import get_v2_design
+
     # Проверяем статус пользователя
     access = check_user_access(user_id)
     is_paid = access.paid_balance > 0 or access.is_premium
+    v2_on = get_v2_design(user_id) if user_id else False
 
     keyboard = [
         [
@@ -253,11 +260,16 @@ def _get_main_keyboard(user_id: int = 0) -> ReplyKeyboardMarkup:
             KeyboardButton(text="🧠 AI-анализ"),
         ])
 
+    # Бета-дизайн карточек (toggle только для админа)
+    if is_admin(user_id):
+        keyboard.append([
+            KeyboardButton(text=BETA_DESIGN_BTN_ON if v2_on else BETA_DESIGN_BTN_OFF),
+        ])
+
     # Добавляем кнопки админки для админов
     if is_admin(user_id):
         keyboard.append([
             KeyboardButton(text="🔬 Анализ (2)"),
-            KeyboardButton(text="📋 Большая карточка"),
             KeyboardButton(text="📊 Админка"),
         ])
 
@@ -316,22 +328,6 @@ def clear_analysis2_mode(user_id: int) -> None:
     _users_analysis2_mode.discard(user_id)
 
 
-# Big card mode — ожидание канала для большой карточки инсайтов
-_users_bigcard_mode: set[int] = set()
-
-
-def is_bigcard_mode(user_id: int) -> bool:
-    return user_id in _users_bigcard_mode
-
-
-def set_bigcard_mode(user_id: int) -> None:
-    _users_bigcard_mode.add(user_id)
-
-
-def clear_bigcard_mode(user_id: int) -> None:
-    _users_bigcard_mode.discard(user_id)
-
-
 def _get_buy_keyboard(user_id: int = 0) -> InlineKeyboardMarkup:
     """Создаёт inline-клавиатуру с вариантами покупки."""
     prices = get_prices(user_id)
@@ -339,7 +335,6 @@ def _get_buy_keyboard(user_id: int = 0) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text=f"✨ 1 полный анализ — {prices['pack_1']} ⭐", callback_data="buy_pack_1")],
             [InlineKeyboardButton(text=f"🎯 3 полных анализа — {prices['pack_3']} ⭐", callback_data="buy_pack_3")],
-            [InlineKeyboardButton(text=f"💎 10 полных анализов — {prices['pack_10']} ⭐", callback_data="buy_pack_10")],
             [InlineKeyboardButton(text="😍 Мне нравится бот — 1 ⭐", callback_data="donate")],
             [InlineKeyboardButton(text=f"❤️ Поддержать проект — {SUPPORT_PRICE} ⭐", callback_data="support")],
         ]

@@ -8,7 +8,7 @@ from typing import Literal, Callable
 import random
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -43,6 +43,11 @@ BRIGHT_COLORS = [ACCENT_GREEN, ACCENT_PINK, ACCENT_PURPLE, ACCENT_BLUE, '#fbbf24
 def _bright_color_func(word, font_size, position, orientation, random_state=None, **kwargs):
     """Яркие случайные цвета из палитры Wrapped."""
     return random.choice(BRIGHT_COLORS)
+
+
+def _white_color_func(word, font_size, position, orientation, random_state=None, **kwargs):
+    """Все слова белым (для v2-дизайна)."""
+    return "#ffffff"
 
 
 def _add_watermark(fig: plt.Figure) -> None:
@@ -125,44 +130,74 @@ def _create_cloud(
         return None
 
 
-def generate_main_cloud(username: str, words: list[str], title: str) -> str | None:
-    """Генерирует основное облако смыслов."""
-    path = f"cloud_{username}.png"
+def generate_main_cloud(username: str, words: list[str], title: str, white_words: bool = False) -> str | None:
+    """Генерирует основное облако смыслов (круг с рваными краями).
+
+    white_words=True — все слова белым (для v2-дизайна).
+    """
+    path = f"cloud_{username}.png" if not white_words else f"cloud_v2_{username}.png"
     return _create_cloud(
         words=words,
         path=path,
-        title_text='Облако смыслов канала',
+        title_text='ОБЛАКО СЛОВ',
         channel_name=_clean_title(title),
+        color_func=_white_color_func if white_words else None,
         max_words=MAX_WORDS_CLOUD,
+        mask=_make_oval_mask(jagged=True),
     )
 
 
-def _get_skull_mask() -> np.ndarray | None:
-    """Загружает маску черепа для облака мата."""
-    mask_path = os.path.join(os.path.dirname(__file__), '..', 'assets', 'skull_mask.png')
-    if os.path.exists(mask_path):
-        img = Image.open(mask_path).convert('L')
-        # WordCloud: 255 = exclude, 0 = draw. Наша маска наоборот, инвертируем.
-        arr = 255 - np.array(img)
-        return arr
-    return None
+def generate_v2_main_cloud(username: str, words: list[str], title: str) -> str | None:
+    """v2-облако: слова белым."""
+    return generate_main_cloud(username, words, title, white_words=True)
+
+
+def generate_v2_mats_cloud(username: str, words: list[str], title: str) -> str | None:
+    """v2-облако мата: оставляем оранжевую палитру (передаёт смысл «плохих» слов)."""
+    return generate_mats_cloud(username, words, title)
+
+
+def _make_oval_mask(w: int = 800, h: int = 900, jagged: bool = False) -> np.ndarray:
+    """Овал. jagged=True — рваные неровные края через полигон с шумом."""
+    import math
+    img = Image.new('L', (w, h), 255)
+    draw = ImageDraw.Draw(img)
+    if not jagged:
+        margin = 10
+        draw.ellipse([margin, margin, w - margin, h - margin], fill=0)
+    else:
+        cx, cy = w // 2, h // 2
+        rx, ry = w // 2 - 20, h // 2 - 20
+        rng = random.Random(42)
+        # Полигон по периметру овала с рандомным отклонением радиуса
+        points = []
+        n_points = 80
+        for i in range(n_points):
+            angle = 2 * math.pi * i / n_points
+            noise = rng.uniform(-0.15, 0.15)  # ±15% отклонение
+            r_x = rx * (1 + noise)
+            r_y = ry * (1 + noise)
+            x = int(cx + r_x * math.cos(angle))
+            y = int(cy + r_y * math.sin(angle))
+            points.append((x, y))
+        draw.polygon(points, fill=0)
+    return np.array(img)
 
 
 def generate_mats_cloud(username: str, words: list[str], title: str) -> str | None:
-    """Генерирует облако ненормативной лексики в форме черепа."""
+    """Генерирует облако ненормативной лексики в форме овала."""
     def color_func(word, font_size, position, orientation, random_state=None, **kwargs):
-        reds = [ACCENT_PINK, '#ef4444', '#f87171', '#dc2626', '#fbbf24']
-        return random.choice(reds)
+        oranges = ['#ff6b35', '#ff8c42', '#f97316', '#ea580c', '#fb923c', '#fbbf24', '#ef4444', '#dc2626', '#f87171']
+        return random.choice(oranges)
 
     path = f"mats_{username}.png"
-    skull_mask = _get_skull_mask()
     return _create_cloud(
         words=words,
         path=path,
         title_text='Облако мата канала',
         channel_name=_clean_title(title),
         color_func=color_func,
-        mask=skull_mask,
+        mask=_make_oval_mask(),
     )
 
 

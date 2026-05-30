@@ -12,7 +12,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import FSInputFile, InputMediaPhoto
 
 from client_pool import get_client_pool
-from analyzer import analyze_channel_web
+from analyzer import analyze_channel_web, analyze_channel_from_json
 from utils import cleanup_analysis_files
 from metrics import record_analysis
 from config import DEFAULT_MESSAGE_LIMIT, FREE_MESSAGE_LIMIT
@@ -50,9 +50,6 @@ from handlers.common import (
     is_analysis2_mode,
     set_analysis2_mode,
     clear_analysis2_mode,
-    is_bigcard_mode,
-    set_bigcard_mode,
-    clear_bigcard_mode,
     send_media_group_chunked,
 )
 
@@ -565,6 +562,26 @@ async def handle_review_button(message: types.Message) -> None:
     )
 
 
+@router.message(F.text.in_({"🎨 Бета-дизайн: ВКЛ", "🎨 Бета-дизайн: ВЫКЛ"}))
+async def handle_beta_design_toggle(message: types.Message) -> None:
+    """Переключает рендер карточек в beta-дизайн (v2). Только для админа."""
+    from db import get_v2_design, set_v2_design
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        return  # Не-админу кнопки нет, и хендлер тихо игнорит
+    now_on = not get_v2_design(user_id)
+    set_v2_design(user_id, now_on)
+    reply = (
+        "🎨 Бета-дизайн ВКЛ.\nТеперь анализ будет приходить в новом дизайне (где уже сверстано)."
+        if now_on else
+        "🎨 Бета-дизайн ВЫКЛ.\nВозвращены стандартные карточки."
+    )
+    await message.answer(
+        reply,
+        reply_markup=_get_main_keyboard(user_id),
+    )
+
+
 @router.message(F.text == "❌ Отмена")
 async def handle_cancel_review(message: types.Message) -> None:
     """Обработчик отмены отзыва/AI-анализа/analysis2."""
@@ -590,29 +607,6 @@ async def handle_analysis2_button(message: types.Message) -> None:
         "Отправьте юзернейм канала:\n"
         "<code>polozhnyak</code> или <code>t.me/polozhnyak</code>\n\n"
         "Я определю архетип канала и найду интересные факты.\n"
-        "Для отмены нажмите /cancel",
-        parse_mode="HTML",
-        reply_markup=types.ReplyKeyboardMarkup(
-            keyboard=[[types.KeyboardButton(text="❌ Отмена")]],
-            resize_keyboard=True,
-            one_time_keyboard=True,
-        ),
-    )
-
-
-@router.message(F.text == "📋 Большая карточка")
-async def handle_bigcard_button(message: types.Message) -> None:
-    """Кнопка большой карточки инсайтов — только для админа."""
-    user = message.from_user
-    if not is_admin(user.id):
-        return
-
-    set_bigcard_mode(user.id)
-    await message.answer(
-        "📋 <b>Большая карточка: Инсайты канала</b>\n\n"
-        "Отправьте юзернейм канала:\n"
-        "<code>polozhnyak</code> или <code>t.me/polozhnyak</code>\n\n"
-        "Я создам инфографику со всеми выводами.\n"
         "Для отмены нажмите /cancel",
         parse_mode="HTML",
         reply_markup=types.ReplyKeyboardMarkup(
@@ -748,6 +742,143 @@ async def callback_personality(callback: types.CallbackQuery) -> None:
             await callback.message.answer(part.strip(), parse_mode="HTML")
 
 
+JSON_MAX_BYTES = 50 * 1024 * 1024   # 50 МБ — лимит Telegram на файлы для ботов
+JSON_TMP_DIR = "/tmp/insight_bot_uploads"
+
+
+@router.message(F.document)
+async def handle_json_upload(message: types.Message) -> None:
+    """Принимает JSON/ZIP экспорт Telegram Desktop и анализирует канал из него.
+
+    Юзер получает: Settings → Advanced → Export Telegram data → JSON, и
+    присылает `result.json` (или ZIP). Преимущество перед обычным анализом —
+    полная история канала + точное число фото и реакций.
+    """
+    if not await _check_access(message):
+        return
+
+    user = message.from_user
+    doc = message.document
+    if not doc:
+        return
+
+    fname = (doc.file_name or "").lower()
+    if not (fname.endswith(".json") or fname.endswith(".zip")):
+        await message.answer(
+            "📎 Похоже на файл, но не на экспорт Telegram.\n\n"
+            "Чтобы проанализировать канал из JSON:\n"
+            "1. На компьютере открой Telegram Desktop\n"
+            "2. Settings → Advanced → Export Telegram data\n"
+            "3. Выбери канал, формат «Machine-readable JSON», "
+            "сними галочки с медиа (фото/видео не нужны)\n"
+            "4. Пришли мне `result.json` (или ZIP с ним)",
+            parse_mode="Markdown",
+            reply_markup=_get_main_keyboard(user.id),
+        )
+        return
+
+    if doc.file_size and doc.file_size > JSON_MAX_BYTES:
+        size_mb = doc.file_size / 1024 / 1024
+        await message.answer(
+            f"❌ Файл слишком большой ({size_mb:.0f} МБ).\n"
+            f"Лимит — {JSON_MAX_BYTES // 1024 // 1024} МБ. "
+            "При экспорте сними галочки со всех медиа (фото/видео/voice), "
+            "тогда останется только текст и будет в разы меньше.",
+            reply_markup=_get_main_keyboard(user.id),
+        )
+        return
+
+    os.makedirs(JSON_TMP_DIR, exist_ok=True)
+    local_path = os.path.join(JSON_TMP_DIR, f"{user.id}_{doc.file_unique_id}_{fname}")
+
+    status_msg = await message.answer("📥 Загружаю файл…")
+    try:
+        await message.bot.download(doc, destination=local_path)
+    except Exception as e:  # noqa: BLE001
+        logger.exception(f"JSON download failed for user {user.id}: {e}")
+        await status_msg.edit_text("❌ Не получилось скачать файл. Попробуй ещё раз.")
+        return
+
+    try:
+        await status_msg.edit_text("🔬 Анализирую… это займёт минуту.")
+    except TelegramBadRequest:
+        pass
+
+    try:
+        result = await analyze_channel_from_json(local_path, lite_mode=False, enable_llm=False)
+    except Exception as e:  # noqa: BLE001
+        logger.exception(f"JSON analysis failed for user {user.id}: {e}")
+        await status_msg.edit_text(
+            "❌ Ошибка при разборе файла. Это точно `result.json` экспорта Telegram Desktop?",
+            parse_mode="Markdown",
+        )
+        return
+    finally:
+        try:
+            os.remove(local_path)
+        except OSError:
+            pass
+
+    if not result or not result.cloud_path:
+        await status_msg.edit_text(
+            "❌ В файле не нашлось текстовых постов. "
+            "Канал пустой или это экспорт не того типа.",
+        )
+        return
+
+    await status_msg.delete()
+
+    # Бета-дизайн: полная v2 галерея (без legacy если отрисовалась)
+    from db import get_v2_design
+    beta_active = get_v2_design(user.id) and is_admin(user.id)
+    if beta_active:
+        try:
+            from visualization.v2_cards import render_full_v2_gallery
+            channel_key = (result.title or "channel").lower().replace(" ", "_")[:40]
+            v2_paths = render_full_v2_gallery(result, channel_key)
+            if v2_paths:
+                v2_media = [InputMediaPhoto(media=FSInputFile(str(p))) for p in v2_paths]
+                await send_media_group_chunked(message, v2_media)
+                # v2 успешно — legacy НЕ шлём
+                if result.fun_facts:
+                    safe_title = html.escape(result.title)
+                    facts_text = f"💡 <b>Факты о канале {safe_title}</b>\n\n"
+                    for fact in result.fun_facts:
+                        facts_text += f"• {fact}\n"
+                    await message.answer(facts_text, parse_mode="HTML",
+                                         reply_markup=_get_main_keyboard(user.id))
+                log_channel_analysis(result.title or "json_upload", result.title or "",
+                                     subscribers=0, analyzed_by=user.id)
+                return
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"v2 render failed (json) for user {user.id}: {e}")
+
+    # Legacy-карточки — отправляем как обычно (если бета off или v2 упал)
+    media = []
+    if result.archetype_path and os.path.exists(result.archetype_path):
+        cap = f"🔬 <b>Архетип канала {html.escape(result.title)}</b>"
+        media.append(InputMediaPhoto(media=FSInputFile(result.archetype_path), caption=cap, parse_mode="HTML"))
+    for path in [result.topics_path, result.cloud_path, result.graph_path, result.heatmap_path,
+                 result.hour_path, result.weekday_path, result.sentiment_path, result.mats_path,
+                 result.phrases_path, result.names_path, result.register_path, result.dichotomy_path,
+                 result.mentions_path, result.insights_path]:
+        if path and os.path.exists(path):
+            media.append(InputMediaPhoto(media=FSInputFile(path)))
+    if media:
+        await send_media_group_chunked(message, media)
+
+    if result.fun_facts:
+        safe_title = html.escape(result.title)
+        facts_text = f"💡 <b>Факты о канале {safe_title}</b>\n\n"
+        for fact in result.fun_facts:
+            facts_text += f"• {fact}\n"
+        await message.answer(facts_text, parse_mode="HTML",
+                             reply_markup=_get_main_keyboard(user.id))
+
+    log_channel_analysis(result.title or "json_upload", result.title or "",
+                         subscribers=0, analyzed_by=user.id)
+
+
 @router.message(F.text)
 async def handle_msg(message: types.Message) -> None:
     """Обработчик текстовых сообщений с юзернеймом канала."""
@@ -789,12 +920,6 @@ async def handle_msg(message: types.Message) -> None:
     if is_analysis2_mode(user.id):
         clear_analysis2_mode(user.id)
         await _perform_analysis2(message)
-        return
-
-    # Перехват Большая карточка
-    if is_bigcard_mode(user.id):
-        clear_bigcard_mode(user.id)
-        await _perform_bigcard(message)
         return
 
     # Регистрируем пользователя
@@ -1020,6 +1145,23 @@ async def _perform_analysis2(message: types.Message) -> None:
             )
             return
 
+        # Бета-дизайн (v2): дополнительно отрисовываем готовые HTML-шаблоны
+        # и отправляем перед legacy-галереей. Если шаблонов ещё нет — просто пусто.
+        from db import get_v2_design
+        beta_active = get_v2_design(user.id) and is_admin(user.id)
+        if beta_active:
+            try:
+                from visualization.v2_cards import render_full_v2_gallery
+                channel_key = (result.title or "channel").lower().replace(" ", "_")[:40]
+                v2_paths = render_full_v2_gallery(result, channel_key)
+                if v2_paths:
+                    v2_media = [InputMediaPhoto(media=FSInputFile(str(p))) for p in v2_paths]
+                    await send_media_group_chunked(message, v2_media)
+                    return  # в бета-режиме legacy-галерею НЕ отправляем
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"v2 render failed for user {user.id}: {e}")
+                # При ошибке упадём на legacy ниже
+
         # Отправляем карточку архетипа
         media = []
         if result.archetype_path and os.path.exists(result.archetype_path):
@@ -1080,85 +1222,6 @@ async def _perform_analysis2(message: types.Message) -> None:
 
     except Exception as e:
         logger.exception(f"Ошибка Анализ (2) для канала {channel}")
-        await message.answer(
-            "❌ Произошла ошибка. Попробуйте позже.",
-            reply_markup=_get_main_keyboard(user.id),
-        )
-    finally:
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-
-
-async def _perform_bigcard(message: types.Message) -> None:
-    """
-    Большая карточка: инфографика со всеми инсайтами канала.
-    Веб-парсинг → full pipeline → карточка инсайтов.
-    """
-    user = message.from_user
-
-    # Извлекаем username
-    raw = message.text.replace('@', '').strip()
-    if 't.me/' in raw:
-        raw = raw.split('t.me/')[-1]
-    channel = raw.split('?')[0].split('/')[0].strip()
-
-    if not channel or channel.startswith('+'):
-        await message.answer(
-            "❌ Отправьте юзернейм публичного канала.",
-            reply_markup=_get_main_keyboard(user.id),
-        )
-        return
-
-    # Rate limit
-    can_proceed, wait_seconds = await check_and_update_rate_limit(user.id)
-    if not can_proceed:
-        await message.answer(f"⏳ Подождите {format_wait_time(wait_seconds)} перед следующим запросом.")
-        return
-
-    status_msg = await message.answer("📋 Создаю большую карточку... Это займёт 15-30 секунд")
-
-    try:
-        result = await analyze_channel_web(channel, limit=300, lite_mode=False)
-
-        if not result or not result.cloud_path:
-            await status_msg.delete()
-            await message.answer(
-                "❌ Канал не найден или пуст.",
-                reply_markup=_get_main_keyboard(user.id),
-            )
-            return
-
-        # Отправляем карточку инсайтов
-        if result.insights_path and os.path.exists(result.insights_path):
-            await message.answer_photo(
-                FSInputFile(result.insights_path),
-                caption=f"📋 <b>Инсайты канала {html.escape(result.title)}</b>",
-                parse_mode="HTML",
-                reply_markup=_get_main_keyboard(user.id),
-            )
-        else:
-            # Фоллбэк — текстом
-            if result.insights:
-                safe_title = html.escape(result.title)
-                insights_text = f"🔍 <b>Инсайты канала {safe_title}</b>\n\n"
-                for insight in result.insights:
-                    insights_text += f"{insight}\n"
-                await message.answer(insights_text, parse_mode="HTML",
-                                     reply_markup=_get_main_keyboard(user.id))
-            else:
-                await message.answer(
-                    "❌ Не удалось сгенерировать инсайты.",
-                    reply_markup=_get_main_keyboard(user.id),
-                )
-
-        # Cleanup
-        cleanup_analysis_files(result)
-        logger.info(f"Большая карточка канала {channel} для admin {user.id}")
-
-    except Exception as e:
-        logger.exception(f"Ошибка Большая карточка для канала {channel}")
         await message.answer(
             "❌ Произошла ошибка. Попробуйте позже.",
             reply_markup=_get_main_keyboard(user.id),
@@ -1417,6 +1480,27 @@ async def _perform_analysis(message: types.Message, channel: str | int, is_priva
                 f"👤 Упомянуто личностей: {result.stats.unique_names_count} "
                 f"({result.stats.total_names_mentions} упоминаний)"
             )
+
+        # Бета-дизайн: полная v2 галерея вместо legacy (только админу)
+        from db import get_v2_design
+        if get_v2_design(user.id) and is_admin(user.id):
+            try:
+                from visualization.v2_cards import render_full_v2_gallery
+                channel_key = (result.title or "channel").lower().replace(" ", "_")[:40]
+                v2_paths = render_full_v2_gallery(result, channel_key)
+                if v2_paths:
+                    v2_media = [InputMediaPhoto(media=FSInputFile(str(p))) for p in v2_paths]
+                    # caption на первой v2-карточке
+                    v2_media[0].caption = caption
+                    v2_media[0].parse_mode = "HTML"
+                    await send_media_group_chunked(message, v2_media)
+                    try:
+                        await status_msg.delete()
+                    except Exception:
+                        pass
+                    return
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"v2 render failed for user {user.id} (_perform_analysis): {e}")
 
         # Собираем медиагруппу
         media = []

@@ -6,9 +6,10 @@ import os
 import json
 import shutil
 import asyncio
+from pathlib import Path
 import functools
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from collections import Counter
 from datetime import datetime, timezone
 from time import time as time_now
@@ -70,6 +71,282 @@ class ChannelStats:
 
 
 @dataclass
+class V2CardData:
+    """Метрики для нового дизайна карточек (v2).
+
+    Часть полей вычисляется из текста постов (chars, words, mat %, архетипы);
+    поля total_photos/total_reactions/top_posts требуют расширенного источника
+    (медиа-тип + реакции) и пока остаются placeholders (0/пусто) — заполнятся
+    когда вызывающий код прокинет их через build_v2_card_data().
+    """
+    # 01 cover / 03 в цифрах
+    total_posts: int = 0
+    total_chars: int = 0
+    total_words: int = 0
+    total_photos: int = 0          # TODO: из источника (Telethon Message.media)
+    max_consecutive_days: int = 0
+    years_covered: int = 0
+    start_date: str = ""           # ISO YYYY-MM-DD
+    end_date: str = ""
+    posts_per_day_avg: float = 0.0
+
+    # 04 sum_of_reactions
+    total_reactions: int = 0       # TODO: из источника (Telethon Message.reactions)
+    avg_reactions_per_post: float = 0.0
+
+    # 05 archetype_vocab
+    vocab_archetype: str = ""      # Молчун / Стандарт / Эрудит / Интеллектуал / Гений
+
+    # 06 chronotype
+    peak_hour: int = 0
+    chronotype_archetype: str = "" # Волк/Сова/Лунатик/Жаворонок/Синица/Белочка/Кот/Лиса/Хроно-хаос
+    peak_bucket_share: float = 0.0 # % постов в 3-часовом «окне» вокруг пика — для подписи «N% постов»
+
+    # 08 post_by_days_weeks
+    favorite_weekday: int = 0      # 0=пн ... 6=вс
+
+    # 10 archetype_bad
+    mat_percent_of_text: float = 0.0
+    posts_with_mat_percent: float = 0.0
+    toxicity_archetype: str = ""   # Ангел / Сдержанный / Бурный / Ядовитый
+
+    # 11 geography
+    top_cities: list[tuple[str, int]] = field(default_factory=list)
+    total_city_mentions: int = 0
+    heart_city: str = ""
+
+    # 13 emotions
+    emotion_palette_name: str = "" # Драматическая / Радостная / Тревожная / Спокойная
+    top_emoji: str = ""
+    top_emoji_count: int = 0
+    top_emojis_strip: list[str] = field(default_factory=list)  # 4 эмодзи для подпись «🙏😭😡😍»
+
+    # Большой архетип канала по Юнгу (12 вариантов, классифицирует LLM)
+    jungian_archetype: str = ""    # Мудрец / Искатель / ... / Маг
+
+    # 14 one_phrase
+    one_phrase_llm: str = ""       # TODO: отдельный LLM-вызов
+
+    # 15 hit_post
+    top_posts: list[dict] = field(default_factory=list)  # TODO: из источника
+
+    # 16 reading_stats
+    reading_time_hours: float = 0.0
+    coffee_cups: int = 0
+    sitcom_seasons: float = 0.0
+
+    # 17 most_used_word
+    top_word: str = ""
+    top_word_count: int = 0
+
+    # 07 word cloud — топ-150 слов с весами (используется в render_07_word_cloud
+    # для генерации wordcloud на лету: белые слова, форма овала, прозрачный фон)
+    top_words_for_cloud: list[tuple[str, int]] = field(default_factory=list)
+    top_mat_words_for_cloud: list[tuple[str, int]] = field(default_factory=list)
+
+    # 18 top_person
+    top_names_with_counts: list[tuple[str, int]] = field(default_factory=list)
+
+
+def _classify_vocab(unique_count: int) -> str:
+    """8 уровней по unique_count — соответствуют variants.VOCAB_VARIANTS."""
+    if unique_count < 9_247:      return ""                  # less_6000: без архетипа
+    if unique_count < 12_247:     return "Интеллектуал"
+    if unique_count < 15_000:     return "Мастер Слова"
+    if unique_count < 18_237:     return "Лингвист"
+    if unique_count < 22_237:     return "Поэт"
+    if unique_count < 27_237:     return "Писатель"
+    if unique_count < 36_237:     return "Великий Писатель"
+    return "Лексический Титан"
+
+
+def _classify_chronotype(peak_hour: int) -> str:
+    """9 архетипов по часовому пику — соответствуют variants.CHRONOTYPE_VARIANTS."""
+    if 21 <= peak_hour <= 23:    return "Волк"
+    if  0 <= peak_hour <=  2:    return "Сова"
+    if  3 <= peak_hour <=  5:    return "Лунатик"
+    if  6 <= peak_hour <=  8:    return "Жаворонок"
+    if  9 <= peak_hour <= 11:    return "Синица"
+    if 12 <= peak_hour <= 14:    return "Белочка"
+    if 15 <= peak_hour <= 17:    return "Кот"
+    if 18 <= peak_hour <= 20:    return "Лиса"
+    return "Хроно-хаос"
+
+
+def _classify_toxicity(mat_pct: float) -> str:
+    """7 уровней по mat % — соответствуют variants.TOXICITY_VARIANTS."""
+    if mat_pct <= 0.001: return "Ангел"
+    if mat_pct < 0.5:    return "Светлый"
+    if mat_pct < 1.0:    return "Прямой"
+    if mat_pct < 1.5:    return "Острый"
+    if mat_pct < 2.5:    return "Ядовитый"
+    if mat_pct < 5.0:    return "Ядерный"
+    return "Дотер"
+
+
+# Категории эмодзи для определения палитры эмоций
+_EMOJI_DRAMA   = set("😭😢😡🤬💔😱😰😨🥺😔🥲")
+_EMOJI_JOY     = set("😂🤣😍🥰❤️💕✨🔥🎉🥳😄😁🙂")
+_EMOJI_CALM    = set("🤍😌🙏🕊️🌿🌸🍃☀️🌙")
+_EMOJI_ANGER   = set("😤😠💢👿🤯🙄😒")
+
+def _classify_emotion_palette(top_emojis: list[tuple[str, int]]) -> str:
+    if not top_emojis:
+        return "Нейтральная"
+    score = {"Драматическая": 0, "Радостная": 0, "Спокойная": 0, "Тревожная": 0}
+    for emoji, cnt in top_emojis[:15]:
+        if emoji in _EMOJI_DRAMA: score["Драматическая"] += cnt
+        elif emoji in _EMOJI_JOY: score["Радостная"]    += cnt
+        elif emoji in _EMOJI_CALM: score["Спокойная"]   += cnt
+        elif emoji in _EMOJI_ANGER: score["Тревожная"]  += cnt
+    return max(score, key=score.get) if max(score.values()) > 0 else "Нейтральная"
+
+
+def _max_consecutive_days(dates: list[datetime]) -> int:
+    if not dates:
+        return 0
+    days = sorted({d.astimezone(MOSCOW_TZ).date() for d in dates})
+    best = run = 1
+    for prev, curr in zip(days, days[1:]):
+        if (curr - prev).days == 1:
+            run += 1
+            best = max(best, run)
+        else:
+            run = 1
+    return best
+
+
+# Скорость чтения и метафоры для карточки 16
+_CHARS_PER_MINUTE = 1000          # ≈ 200 wpm, кириллица
+_MINUTES_PER_COFFEE = 45          # одна чашка кофе ≈ 45 мин чтения
+_MINUTES_PER_SITCOM_SEASON = 20 * 22  # 22 серии × 20 мин
+
+
+def build_v2_card_data(
+    posts: list[tuple[datetime, str]],
+    all_words: list[str],
+    mat_words: list[str],
+    word_counter: "Counter",
+    top_emojis: list[tuple[str, int]],
+    hour_counts: "Counter",
+    weekday_counts: "Counter",
+    city_counter: "Counter",
+    names_counter: "Counter",
+    *,
+    total_photos: int = 0,
+    total_reactions: int = 0,
+    top_posts: list[dict] | None = None,
+) -> V2CardData:
+    """Вычисляет V2CardData из агрегатов, уже собранных в `_run_analysis_pipeline`.
+
+    Часть полей (фото, реакции, хит-посты) опциональна — передаётся когда
+    источник их умеет отдавать (Telethon), иначе остаётся 0/пусто.
+    """
+    if not posts:
+        return V2CardData()
+
+    dates = [d for d, _ in posts]
+    total_chars = sum(len(text or "") for _, text in posts)
+    total_words = sum(len((text or "").split()) for _, text in posts)
+    start = min(dates).astimezone(MOSCOW_TZ)
+    end = max(dates).astimezone(MOSCOW_TZ)
+    span_days = max((end - start).days + 1, 1)
+    years_covered = max(end.year - start.year + 1, 1)
+    posts_per_day = len(posts) / span_days
+
+    # mat %
+    mat_pct = (len(mat_words) / len(all_words) * 100) if all_words else 0.0
+    posts_with_mat = 0
+    if mat_words:
+        mat_set = set(mat_words)
+        from nlp.processor import get_clean_words  # отложенный импорт
+        for _, text in posts:
+            if any(w in mat_set for w in get_clean_words(text, "mats")):
+                posts_with_mat += 1
+    pwm_pct = (posts_with_mat / len(posts) * 100) if posts else 0.0
+
+    unique_count = len({w for w in all_words})
+    top_w, top_w_cnt = (word_counter.most_common(1)[0] if word_counter else ("", 0))
+
+    peak_hour = max(hour_counts, key=hour_counts.get) if hour_counts else 0
+    fav_wd = max(weekday_counts, key=weekday_counts.get) if weekday_counts else 0
+    # Доля постов в 3-часовом «окне» вокруг пика — для подписи «N% твоих постов».
+    # Bucket'ы совпадают с архетипами хронотипа (variants.CHRONOTYPE_VARIANTS).
+    _CHRONO_BUCKETS = [(21,22,23), (0,1,2), (3,4,5), (6,7,8),
+                       (9,10,11), (12,13,14), (15,16,17), (18,19,20)]
+    bucket = next((b for b in _CHRONO_BUCKETS if peak_hour in b), (peak_hour,))
+    bucket_sum = sum(hour_counts.get(h, 0) for h in bucket)
+    peak_share = (bucket_sum / len(posts) * 100) if posts else 0.0
+
+    cities_top = city_counter.most_common(6) if city_counter else []
+    total_city_mentions = sum(city_counter.values()) if city_counter else 0
+    heart_city = cities_top[0][0] if cities_top else ""
+
+    top_emoji, top_emoji_cnt = (top_emojis[0] if top_emojis else ("", 0))
+    emojis_strip = [e for e, _ in top_emojis[:4]]
+    palette = _classify_emotion_palette(top_emojis)
+
+    # Чтение
+    minutes_to_read = total_chars / _CHARS_PER_MINUTE if total_chars else 0
+    reading_hours = round(minutes_to_read / 60, 1)
+    coffee = int(round(minutes_to_read / _MINUTES_PER_COFFEE))
+    sitcom = round(minutes_to_read / _MINUTES_PER_SITCOM_SEASON, 1)
+
+    avg_reactions = (total_reactions / len(posts)) if (total_reactions and posts) else 0.0
+
+    return V2CardData(
+        total_posts=len(posts),
+        total_chars=total_chars,
+        total_words=total_words,
+        total_photos=total_photos,
+        max_consecutive_days=_max_consecutive_days(dates),
+        years_covered=years_covered,
+        start_date=start.date().isoformat(),
+        end_date=end.date().isoformat(),
+        posts_per_day_avg=round(posts_per_day, 1),
+
+        total_reactions=total_reactions,
+        avg_reactions_per_post=round(avg_reactions, 1),
+
+        vocab_archetype=_classify_vocab(unique_count),
+
+        peak_hour=peak_hour,
+        chronotype_archetype=_classify_chronotype(peak_hour),
+        peak_bucket_share=round(peak_share, 0),
+
+        favorite_weekday=fav_wd,
+
+        mat_percent_of_text=round(mat_pct, 1),
+        posts_with_mat_percent=round(pwm_pct, 1),
+        toxicity_archetype=_classify_toxicity(mat_pct),
+
+        top_cities=cities_top,
+        total_city_mentions=total_city_mentions,
+        heart_city=heart_city,
+
+        emotion_palette_name=palette,
+        top_emoji=top_emoji,
+        top_emoji_count=top_emoji_cnt,
+        top_emojis_strip=emojis_strip,
+
+        top_posts=top_posts or [],
+
+        reading_time_hours=reading_hours,
+        coffee_cups=coffee,
+        sitcom_seasons=sitcom,
+
+        top_word=top_w,
+        top_word_count=top_w_cnt,
+        top_words_for_cloud=word_counter.most_common(150) if word_counter else [],
+        top_mat_words_for_cloud=(
+            list(Counter(mat_words).most_common(80)) if mat_words else []
+        ),
+
+        top_names_with_counts=names_counter.most_common(6) if names_counter else [],
+    )
+
+
+@dataclass
 class AnalysisResult:
     """Результат анализа канала."""
     title: str = ""
@@ -107,6 +384,9 @@ class AnalysisResult:
     # Данные
     top_emojis: list[tuple[str, int]] = field(default_factory=list)
     from_cache: bool = False  # Флаг: результат из кэша
+
+    # Метрики для v2-дизайна карточек (см. visualization/v2_cards/)
+    v2: V2CardData = field(default_factory=V2CardData)
 
     def get_all_paths(self) -> list[str]:
         """Возвращает список всех путей к файлам."""
@@ -294,6 +574,18 @@ def _load_from_cache(channel_id: str, require_full: bool = False) -> AnalysisRes
         result.topics = meta.get("topics", [])
         result.insights = meta.get("insights", [])
 
+        # v2 card data (новые поля — старые кэши не имеют этого блока)
+        v2_meta = meta.get("v2") or {}
+        if v2_meta:
+            # Списки кортежей в JSON становятся списками списков — конвертируем обратно
+            v2_meta["top_cities"] = [tuple(x) for x in v2_meta.get("top_cities", [])]
+            v2_meta["top_names_with_counts"] = [tuple(x) for x in v2_meta.get("top_names_with_counts", [])]
+            try:
+                result.v2 = V2CardData(**v2_meta)
+            except TypeError:
+                # Поле в кэше из устаревшей версии — пропускаем, оставляем дефолт
+                pass
+
         # Копируем изображения из кэша во временные файлы
         for img_name in ["cloud.png", "graph.png", "mats.png", "sentiment.png",
                          "weekday.png", "hour.png",
@@ -338,6 +630,7 @@ def _save_to_cache(channel_id: str, result: AnalysisResult, lite_mode: bool = Fa
             "fun_facts": result.fun_facts,
             "topics": result.topics,
             "insights": result.insights,
+            "v2": asdict(result.v2),
             "lite": lite_mode,
         }
         with open(os.path.join(cache_path, "meta.json"), "w") as f:
@@ -501,6 +794,10 @@ async def _run_analysis_pipeline(
     repost_count: int = 0,
     repost_percent: float = 0.0,
     enable_llm: bool = False,
+    *,
+    total_photos: int = 0,
+    total_reactions: int = 0,
+    top_posts: list[dict] | None = None,
 ) -> AnalysisResult:
     """
     Общая логика анализа постов канала: извлечение слов, генерация графиков, статистика.
@@ -563,6 +860,7 @@ async def _run_analysis_pipeline(
     hour_counts: Counter = Counter()
     weekday_counts: Counter = Counter()
     top_phrases: list = []
+    names_counter: Counter = Counter()
 
     if lite_mode:
         # LITE MODE: только облако + топ слов (параллельно)
@@ -819,6 +1117,55 @@ async def _run_analysis_pipeline(
                 generate_insights_card, channel_id, title, insights_list
             )
 
+    # Метрики для нового дизайна карточек (v2)
+    v2_data = build_v2_card_data(
+        posts=posts,
+        all_words=all_words,
+        mat_words=mat_words,
+        word_counter=word_counter,
+        top_emojis=top_emojis,
+        hour_counts=hour_counts,
+        weekday_counts=weekday_counts,
+        city_counter=city_counter,
+        names_counter=names_counter,
+        total_photos=total_photos,
+        total_reactions=total_reactions,
+        top_posts=top_posts,
+    )
+
+    # LLM-обогащение v2 (one_phrase + jungian архетип)
+    if not lite_mode:
+        try:
+            from llm import generate_one_phrase, classify_jungian_archetype
+            sample_texts = [t for _, t in posts if t and len(t) > 20][:50]
+            phrase = await generate_one_phrase(title, sample_texts) if sample_texts else None
+            if phrase:
+                v2_data.one_phrase_llm = phrase
+
+            # Сигналы для Юнгианского классификатора
+            signals = {
+                "топ-слова": ", ".join(w for w, _ in word_counter.most_common(15)) if word_counter else "",
+                "топ-эмодзи": ", ".join(e for e, _ in top_emojis[:5]) if top_emojis else "",
+                "топ-фразы": ", ".join(" ".join(p) for p, _ in top_phrases[:5]) if top_phrases else "",
+                "темы (LLM)": ", ".join(topics_list) if topics_list else "",
+                "хронотип": v2_data.chronotype_archetype,
+                "vocab уровень": v2_data.vocab_archetype,
+                "mat %": f"{v2_data.mat_percent_of_text}",
+                "позитив %": f"{pos_percent:.1f}",
+                "агрессия %": f"{agg_percent:.1f}",
+                "метафизика %": f"{meta_percent:.1f}",
+                "повседневное %": f"{everyday_percent:.1f}",
+                "ср. длина поста": f"{avg_len_val:.0f}",
+                "scream (КАПС) индекс": f"{scream_index:.1f}",
+                "ночные посты %": f"{night_post_percent:.1f}",
+                "репост %": f"{repost_percent:.1f}",
+            }
+            jungian = await classify_jungian_archetype(title, signals)
+            if jungian:
+                v2_data.jungian_archetype = jungian
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"LLM v2 enrichment failed: {e}")
+
     return AnalysisResult(
         title=title, subscribers=subscribers, stats=stats,
         cloud_path=cloud_path, graph_path=graph_path,
@@ -837,7 +1184,48 @@ async def _run_analysis_pipeline(
         fun_facts=fun_facts_list,
         topics=topics_list,
         insights=insights_list,
+        v2=v2_data,
     )
+
+
+async def analyze_channel_from_json(
+    json_path: str,
+    *,
+    lite_mode: bool = False,
+    enable_llm: bool = False,
+) -> AnalysisResult | None:
+    """Анализирует канал из JSON-экспорта Telegram Desktop.
+
+    Преимущество над web/Telethon — полная история канала + фото + реакции,
+    без рейт-лимитов. Юзер делает Settings → Advanced → Export Telegram data
+    → JSON и присылает result.json (или ZIP с ним).
+    """
+    from telegram_export import parse_telegram_export
+
+    logger.info(f"[JSON] Парсю экспорт: {json_path}")
+    export = parse_telegram_export(json_path)
+    if not export.posts:
+        logger.warning(f"[JSON] В экспорте нет постов: {json_path}")
+        return None
+
+    channel_key = export.channel_id or Path(json_path).stem
+    logger.info(
+        f"[JSON] {export.name!r}: {len(export.posts)} постов, "
+        f"{export.total_photos} фото, {export.total_reactions} реакций"
+    )
+
+    result = await _run_analysis_pipeline(
+        export.posts,
+        channel_key,
+        export.name,
+        subscribers=0,            # JSON-экспорт не содержит счётчика подписчиков
+        lite_mode=lite_mode,
+        enable_llm=enable_llm,
+        total_photos=export.total_photos,
+        total_reactions=export.total_reactions,
+        top_posts=export.top_posts,
+    )
+    return result
 
 
 async def analyze_channel_web(

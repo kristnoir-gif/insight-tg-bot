@@ -107,7 +107,6 @@ async def handle_buy_button(message: types.Message) -> None:
 _PACK_INFO = {
     "pack_1": {"title": "1 полный анализ", "description": "AI-портрет личности автора + тональность, активность, личности, фразы"},
     "pack_3": {"title": "3 полных анализа", "description": "AI-портрет личности автора + полный анализ 3 каналов: тональность, активность, фразы, эмодзи"},
-    "pack_10": {"title": "10 полных анализов", "description": "AI-портрет личности автора + полный анализ 10 каналов"},
 }
 
 
@@ -137,11 +136,6 @@ async def callback_buy_pack_1(callback: types.CallbackQuery) -> None:
 @router.callback_query(F.data == "buy_pack_3")
 async def callback_buy_pack_3(callback: types.CallbackQuery) -> None:
     await _handle_pack_purchase(callback, "pack_3")
-
-
-@router.callback_query(F.data == "buy_pack_10")
-async def callback_buy_pack_10(callback: types.CallbackQuery) -> None:
-    await _handle_pack_purchase(callback, "pack_10")
 
 
 @router.callback_query(F.data == "support")
@@ -185,7 +179,7 @@ async def handle_pre_checkout(pre_checkout: PreCheckoutQuery) -> None:
     prices = get_prices(user_id)
 
     expected = None
-    if payload in ("pack_1", "pack_3", "pack_10"):
+    if payload in ("pack_1", "pack_3"):
         expected = prices[payload]
     elif payload == "support":
         expected = SUPPORT_PRICE
@@ -204,7 +198,7 @@ async def handle_pre_checkout(pre_checkout: PreCheckoutQuery) -> None:
     await pre_checkout.answer(ok=True)
 
 
-_PACK_AMOUNTS = {"pack_1": 1, "pack_3": 3, "pack_10": 10}
+_PACK_AMOUNTS = {"pack_1": 1, "pack_3": 3}
 
 _PACK_MESSAGES = {
     "pack_1": (
@@ -223,11 +217,6 @@ _PACK_MESSAGES = {
         "• Активность по дням/часам\n"
         "• Личности, фразы, эмодзи\n\n"
         "Отправьте юзернейм канала!"
-    ),
-    "pack_10": (
-        "✅ *Спасибо за покупку!*\n\n"
-        "💎 На ваш баланс добавлено *10 полных анализов*.\n\n"
-        "Отправьте юзернейм канала для полного анализа!"
     ),
 }
 

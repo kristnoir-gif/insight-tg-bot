@@ -29,6 +29,143 @@ def _sanitize_html(text: str) -> str:
     return _TAG_RE.sub(_replace, text)
 
 
+_JUNGIAN_DESCRIPTIONS = {
+    "Мудрец":         "аналитический контент, сложные смыслы, длинные посты, экспертный тон",
+    "Искатель":       "темы путешествий, поиск нового, разнообразие интересов, частые вопросы",
+    "Простодушный":   "позитивный тон, простой язык, искренние истории, отсутствие агрессии",
+    "Бунтарь":        "провокации, высокий мат, КАПС, острая критика, нонконформизм",
+    "Борец":          "темы целей, побед, преодоления, мотивация, спорт/достижения",
+    "Творец":         "уникальный визуальный стиль, креативная лексика, искусство, эстетика",
+    "Славный малый":  "повседневные жизненные истории, бытовая лексика, разговоры «для своих»",
+    "Любовник":       "эмоции, чувства, отношения, романтика, эстетические эмодзи",
+    "Шут":            "ирония, мемы, сарказм, фановое общение, высокая частота эмодзи",
+    "Опекун":         "советы, гайды, поддержка аудитории, помощь, забота, лайфхаки",
+    "Правитель":      "экспертный контент, лидерская позиция, масштабные темы, статус",
+    "Маг":            "инсайты, трансформации, нестандартный взгляд, переосмысление",
+}
+
+
+async def generate_one_phrase(
+    channel_title: str,
+    posts_sample: list[str],
+    *,
+    max_words: int = 25,
+) -> str | None:
+    """Генерирует одну броскую фразу-эссенцию канала (для карточки 14).
+
+    Пример: «Девушка-разработчица из Питера, переехавшая в Тбилиси,
+    философствует в 2 ночи о любви, котах, нейросетях и разводе».
+    """
+    if not LLM_API_KEY or not posts_sample:
+        return None
+    sample = "\n".join(p[:300] for p in posts_sample[:50] if p)[:6000]
+    system = (
+        "Ты — психолог-литератор. На основе нескольких постов канала "
+        f"сформулируй ОДНО ёмкое описание канала из не более чем {max_words} слов. "
+        "Без воды, без вступления, без объяснений. Сразу фраза. "
+        "Передай характер: возраст, локация, темы, тон, стиль."
+    )
+    user = f"Канал: «{channel_title}»\n\nОбразцы постов:\n{sample}\n\nОдна фраза:"
+    url = f"{LLM_BASE_URL}/chat/completions"
+    headers = {"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "model": LLM_MODEL,
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        "max_tokens": 120, "temperature": 0.7,
+    }
+    try:
+        timeout = aiohttp.ClientTimeout(total=LLM_TIMEOUT)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.warning(f"LLM one_phrase API {resp.status}: {body[:200]}")
+                    return None
+                data = await resp.json()
+        phrase = data["choices"][0]["message"]["content"].strip().strip('"').strip("«»")
+        # Убираем перенос строк и многоточия в начале/конце
+        phrase = " ".join(phrase.split())
+        logger.info(f"LLM one_phrase для '{channel_title}': {phrase[:80]}…")
+        return phrase
+    except TimeoutError:
+        logger.warning(f"LLM one_phrase timeout для '{channel_title}'")
+        return None
+    except (aiohttp.ClientError, KeyError, IndexError) as e:
+        logger.warning(f"LLM one_phrase error: {type(e).__name__}: {e}")
+        return None
+
+
+async def classify_jungian_archetype(
+    channel_title: str,
+    signals: dict,
+) -> str | None:
+    """Классифицирует канал в один из 12 юнгианских архетипов.
+
+    Args:
+        channel_title: название канала (для контекста)
+        signals: компактная сводка метрик из analyzer:
+            top_words, top_emojis, top_phrases, pos_percent, agg_percent,
+            meta_percent, everyday_percent, mat_percent, avg_len,
+            scream_index, repost_percent, night_post_percent,
+            topics, chronotype, vocab_level
+
+    Returns:
+        Имя архетипа (e.g. "Мудрец") или None при ошибке.
+    """
+    if not LLM_API_KEY:
+        return None
+
+    arch_lines = "\n".join(
+        f"- {name}: {desc}" for name, desc in _JUNGIAN_DESCRIPTIONS.items()
+    )
+    signals_lines = "\n".join(f"{k}: {v}" for k, v in signals.items() if v)
+
+    system = (
+        "Ты — психолог-аналитик, классифицирующий Telegram-каналы по 12 архетипам Юнга. "
+        "На основе аналитических сигналов канала выбери ОДИН наиболее подходящий архетип. "
+        "Отвечай СТРОГО одним словом — именем архетипа из списка, без объяснений и без точки."
+    )
+    user = (
+        f"Канал: «{channel_title}»\n\n"
+        f"СИГНАЛЫ:\n{signals_lines}\n\n"
+        f"АРХЕТИПЫ (выбери один):\n{arch_lines}\n\n"
+        "Ответ — только имя архетипа:"
+    )
+
+    url = f"{LLM_BASE_URL}/chat/completions"
+    headers = {"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "model": LLM_MODEL,
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        "max_tokens": 20,
+        "temperature": 0.3,
+    }
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=LLM_TIMEOUT)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.warning(f"LLM jungian API error {resp.status}: {body[:300]}")
+                    return None
+                data = await resp.json()
+        raw = data["choices"][0]["message"]["content"].strip()
+        # Принудительно матчим в один из известных архетипов (нейронка может прислать "Архетип: Мудрец")
+        for name in _JUNGIAN_DESCRIPTIONS:
+            if name.lower() in raw.lower():
+                logger.info(f"LLM jungian for '{channel_title}': {name}  (raw: {raw!r})")
+                return name
+        logger.warning(f"LLM jungian: не распознан архетип в ответе: {raw!r}")
+        return None
+    except TimeoutError:
+        logger.warning(f"LLM jungian timeout for '{channel_title}'")
+        return None
+    except (aiohttp.ClientError, KeyError, IndexError) as e:
+        logger.warning(f"LLM jungian error for '{channel_title}': {type(e).__name__}: {e}")
+        return None
+
+
 def _build_content_prompt(
     channel_title: str,
     subscribers: int,

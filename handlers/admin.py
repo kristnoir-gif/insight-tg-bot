@@ -255,10 +255,10 @@ async def cmd_paid_users(message: types.Message) -> None:
 
     if funnel:
         text += f"\n📊 *Воронка продаж:*\n"
-        text += f"_Цены: {PRICES['pack_1']}/{PRICES['pack_3']}/{PRICES['pack_10']}⭐_\n\n"
+        text += f"_Цены: {PRICES['pack_1']}/{PRICES['pack_3']}⭐_\n\n"
         menu = funnel.get('open_menu', {'clicks': 0, 'users': 0})
         text += f"  Открыли меню: {menu['clicks']} ({menu['users']} чел.)\n"
-        for pack in ['pack_1', 'pack_3', 'pack_10']:
+        for pack in ['pack_1', 'pack_3']:
             if pack in funnel:
                 f = funnel[pack]
                 text += f"  Выбрали {pack}: {f['clicks']} ({f['users']} чел.)\n"
@@ -538,12 +538,12 @@ async def cmd_stats(message: types.Message) -> None:
                         if action.endswith(f'_{g}'):
                             groups[g][action.replace(f'_{g}', '')] = data
 
-                stages = ['open_menu', 'pack_1', 'pack_3', 'pack_10', 'paid_total']
-                labels = ['Открыли меню', '1 анализ', '3 анализа', '10 анализов', 'Оплатили']
+                stages = ['open_menu', 'pack_1', 'pack_3', 'paid_total']
+                labels = ['Открыли меню', '1 анализ', '3 анализа', 'Оплатили']
 
                 for g in ('a', 'b'):
-                    paid_total_clicks = sum(groups[g].get(f'paid_pack_{p}', {}).get('clicks', 0) for p in ('1', '3', '10'))
-                    paid_total_users = sum(groups[g].get(f'paid_pack_{p}', {}).get('users', 0) for p in ('1', '3', '10'))
+                    paid_total_clicks = sum(groups[g].get(f'paid_pack_{p}', {}).get('clicks', 0) for p in ('1', '3'))
+                    paid_total_users = sum(groups[g].get(f'paid_pack_{p}', {}).get('users', 0) for p in ('1', '3'))
                     groups[g]['paid_total'] = {'clicks': paid_total_clicks, 'users': paid_total_users}
 
                 a_clicks = [groups['a'].get(s, {}).get('clicks', 0) for s in stages]

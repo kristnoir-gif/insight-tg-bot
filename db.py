@@ -151,6 +151,8 @@ def init_db() -> None:
                 cursor.execute("ALTER TABLE users ADD COLUMN paid_balance INTEGER DEFAULT 0")
             if 'premium_until' not in columns:
                 cursor.execute("ALTER TABLE users ADD COLUMN premium_until TIMESTAMP")
+            if 'use_v2_design' not in columns:
+                cursor.execute("ALTER TABLE users ADD COLUMN use_v2_design INTEGER DEFAULT 0")
 
             # Миграция channel_stats: добавляем колонки subscribers и analyzed_by
             cursor.execute("PRAGMA table_info(channel_stats)")
@@ -180,6 +182,13 @@ def init_db() -> None:
                 cursor.execute("ALTER TABLE pending_analyses ADD COLUMN priority INTEGER DEFAULT 0")
 
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_pending_priority ON pending_analyses(priority DESC, created_at ASC)")
+
+            # Миграция pending_analyses: добавляем retry_count
+            cursor.execute("PRAGMA table_info(pending_analyses)")
+            pending_cols2 = {row[1] for row in cursor.fetchall()}
+            if "retry_count" not in pending_cols2:
+                cursor.execute("ALTER TABLE pending_analyses ADD COLUMN retry_count INTEGER DEFAULT 0")
+
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_buy_clicks_user_id ON buy_clicks(user_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_buy_clicks_created_at ON buy_clicks(created_at)")
 
@@ -592,6 +601,33 @@ def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
 
+def get_v2_design(user_id: int) -> bool:
+    """Включён ли у юзера бета-дизайн карточек (v2)."""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT use_v2_design FROM users WHERE user_id = ?", (user_id,))
+            row = cursor.fetchone()
+            return bool(row[0]) if row else False
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка чтения use_v2_design: {e}")
+        return False
+
+
+def set_v2_design(user_id: int, enabled: bool) -> None:
+    """Включает/выключает v2-дизайн карточек для юзера."""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE users SET use_v2_design = ? WHERE user_id = ?",
+                (1 if enabled else 0, user_id),
+            )
+            conn.commit()
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка записи use_v2_design: {e}")
+
+
 def get_all_user_ids() -> list[int]:
     """Возвращает список всех user_id из базы."""
     try:
@@ -891,6 +927,7 @@ def get_next_pending_batch(limit: int = 5) -> list[tuple]:
                 FROM pending_analyses
                 WHERE status = 'pending'
                 AND created_at < datetime('now', '-30 seconds')
+                AND COALESCE(retry_count, 0) < 3
                 ORDER BY priority DESC, created_at ASC
                 LIMIT ?
             """, (limit,))
@@ -999,10 +1036,16 @@ def reset_processing_to_pending() -> int:
 
 
 def update_pending_status(analysis_id: int, status: str) -> None:
-    """Обновляет статус pending анализа."""
+    """Обновляет статус pending анализа. При возврате в pending инкрементирует retry_count."""
     try:
         with get_db_connection() as conn:
-            conn.execute("UPDATE pending_analyses SET status = ? WHERE id = ?", (status, analysis_id))
+            if status == 'pending':
+                conn.execute(
+                    "UPDATE pending_analyses SET status = ?, retry_count = COALESCE(retry_count, 0) + 1 WHERE id = ?",
+                    (status, analysis_id),
+                )
+            else:
+                conn.execute("UPDATE pending_analyses SET status = ? WHERE id = ?", (status, analysis_id))
             conn.commit()
     except sqlite3.Error as e:
         logger.error(f"Ошибка обновления статуса анализа {analysis_id}: {e}")

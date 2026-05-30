@@ -1,0 +1,176 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Caveat:wght@400;500;600;700&family=Poppins:wght@300;400;500;600;700&display=swap');
+
+/* --- TT Nooks (sans, non-script) --- */
+@font-face {
+  font-family: 'TT Nooks Edu';
+  src: url('../../../assets/fonts/TT%20Nooks%20Educational%20Light.otf') format('opentype');
+  font-weight: 300;
+  font-display: block;
+}
+@font-face {
+  font-family: 'TT Nooks Edu';
+  src: url('../../../assets/fonts/TT%20Nooks%20Educational%20Regular.otf') format('opentype');
+  font-weight: 400;
+  font-display: block;
+}
+@font-face {
+  font-family: 'TT Nooks Edu';
+  src: url('../../../assets/fonts/TT%20Nooks%20Educational%20Bold.otf') format('opentype');
+  font-weight: 700;
+  font-display: block;
+}
+@font-face {
+  font-family: 'TT Nooks Edu';
+  src: url('../../../assets/fonts/TT%20Nooks%20Educational%20Black.otf') format('opentype');
+  font-weight: 900;
+  font-display: block;
+}
+
+/* --- TT Nooks Script (italic calligraphic) --- */
+@font-face {
+  font-family: 'TT Nooks Script Edu';
+  src: url('../../../assets/fonts/TT%20Nooks%20Script%20Educational%20Light.otf') format('opentype');
+  font-weight: 300;
+  font-display: block;
+}
+@font-face {
+  font-family: 'TT Nooks Script Edu';
+  src: url('../../../assets/fonts/TT%20Nooks%20Script%20Educational%20Regular.otf') format('opentype');
+  font-weight: 400;
+  font-display: block;
+}
+@font-face {
+  font-family: 'TT Nooks Script Edu';
+  src: url('../../../assets/fonts/TT%20Nooks%20Script%20Educational%20Bold.otf') format('opentype');
+  font-weight: 700;
+  font-display: block;
+}
+@font-face {
+  font-family: 'TT Nooks Script Edu';
+  src: url('../../../assets/fonts/TT%20Nooks%20Script%20Educational%20Black.otf') format('opentype');
+  font-weight: 900;
+  font-display: block;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 1080px;
+  height: 1920px;
+  overflow: hidden;
+  font-family: 'Inter', 'Apple Color Emoji', 'Noto Color Emoji', 'Segoe UI Emoji', system-ui, sans-serif;
+  color: #fff;
+  -webkit-font-smoothing: antialiased;
+}
+
+.card {
+  width: 1080px;
+  height: 1920px;
+  position: relative;
+  overflow: hidden;
+  background: #0e0a24;
+}
+
+/* Dark gradient + magenta glow background */
+.bg-dark {
+  position: absolute; inset: 0;
+  background:
+    radial-gradient(ellipse 60% 50% at 78% 50%, rgba(229,55,118,0.55) 0%, rgba(229,55,118,0.0) 60%),
+    radial-gradient(ellipse 60% 50% at 25% 80%, rgba(96,40,180,0.55) 0%, rgba(96,40,180,0.0) 60%),
+    radial-gradient(ellipse 80% 60% at 50% 0%, rgba(50,30,110,0.7) 0%, rgba(14,10,36,0.0) 60%),
+    linear-gradient(180deg, #0e0a24 0%, #0a0820 50%, #0e0a24 100%);
+}
+
+/* Heart silhouette behind content (translucent pink) */
+.heart {
+  position: absolute;
+  left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  width: 880px; height: 800px;
+  background:
+    radial-gradient(ellipse at center, rgba(255,140,180,0.18) 0%, rgba(255,140,180,0.08) 50%, rgba(255,140,180,0) 70%);
+  filter: blur(2px);
+  pointer-events: none;
+}
+
+/* Top center sparkle */
+.sparkle {
+  color: rgba(255,255,255,0.85);
+  font-size: 36px;
+  text-align: center;
+  margin: 20px 0;
+}
+
+/* Hero title (script font) */
+.hero-script {
+  font-family: 'TT Nooks Script Edu', 'Caveat', cursive;
+  font-weight: 700;
+  line-height: 0.95;
+  text-align: center;
+}
+
+/* Bold sans heading */
+.h-bold {
+  font-family: 'Inter', sans-serif;
+  font-weight: 800;
+  text-align: center;
+  letter-spacing: -0.5px;
+}
+
+/* Subtitle */
+.subtitle {
+  font-family: 'Inter', sans-serif;
+  font-weight: 400;
+  text-align: center;
+  color: rgba(255,255,255,0.85);
+}
+
+/* Glass pill */
+.pill {
+  display: inline-block;
+  background: rgba(255,255,255,0.12);
+  border: 1px solid rgba(255,255,255,0.18);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-radius: 999px;
+  padding: 18px 36px;
+  color: #fff;
+  font-weight: 500;
+}
+
+.pill-white {
+  background: rgba(255,255,255,0.95);
+  color: #0e0a24;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+/* Bottom branding */
+.branding {
+  position: absolute;
+  left: 50%; bottom: 70px;
+  transform: translateX(-50%);
+}
+.branding .pill {
+  font-family: 'Inter', sans-serif;
+  font-weight: 800;
+  font-size: 31px;
+  padding: 16px 40px;
+  letter-spacing: 0.5px;
+}
+
+/* Small logo above branding */
+.brand-logo {
+  position: absolute;
+  left: 50%; bottom: 160px;
+  transform: translateX(-50%);
+  width: 64px; height: 64px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.15);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: rgba(255,255,255,0.65);
+}

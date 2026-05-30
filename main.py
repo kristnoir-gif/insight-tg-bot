@@ -360,10 +360,11 @@ async def _process_single_pending(
         )
 
         if error:
-            if error.startswith("all_cooldown:"):
-                # Снова cooldown — вернуть в pending
+            # Восстанавливаемые ошибки — вернуть в pending для retry
+            recoverable = error.startswith("all_cooldown:") or "timeout" in error.lower()
+            if recoverable:
                 update_pending_status(analysis_id, 'pending')
-                logger.info(f"Auto-retry: {channel_username} returned to pending (cooldown)")
+                logger.info(f"Auto-retry: {channel_username} returned to pending ({error})")
             else:
                 update_pending_status(analysis_id, 'failed')
                 logger.warning(f"Auto-retry failed: {channel_username}: {error}")
@@ -518,7 +519,9 @@ async def main() -> None:
                 f"Запустите `python create_session.py <имя>` на сервере."
             )
             await notify_admin(error_msg)
-            raise RuntimeError("Нет доступных Telethon клиентов. Бот не может работать без них.")
+            # ВРЕМЕННО: бот стартует и без Telethon-клиентов — работает через
+            # web-парсинг и JSON-загрузку. Анализ через @username будет лимитирован.
+            logger.warning("Нет Telethon-сессий — бот будет работать только в web/JSON режиме")
 
         # Уведомляем админа о проблемных сессиях
         if failed_sessions:

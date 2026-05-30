@@ -40,6 +40,24 @@ cache/
 # Generated images (keep example/)
 *.png
 !example/*.png
+*.jpg
+*.jpeg
+*.svg
+
+# Heavy Figma exports / reference dirs
+my_peerfect_card/
+13_may_the_best 2/
+assets/figma/*.json
+cards_full.json
+
+# Local experimental scripts / HTML drafts
+extract_exact_layouts.py
+parse_svg_layouts.py
+channel_wrapped.py
+telegram_export.py
+test_style.py
+project_map.html
+wrapped_*.html
 
 # Generated files
 presentation.html

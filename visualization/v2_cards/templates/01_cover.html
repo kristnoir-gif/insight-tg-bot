@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Cover</title>
+<link rel="stylesheet" href="_base.css">
+<style>
+  .cover-top {
+    position: absolute;
+    top: 130px; left: 0; right: 0;
+    text-align: center;
+  }
+  .cover-top .h-bold {
+    font-size: 96px;
+    line-height: 1.0;
+  }
+  .cover-top .years {
+    font-family: 'Inter', sans-serif;
+    font-style: italic;
+    font-weight: 400;
+    font-size: 70px;
+    margin-top: 36px;
+    color: rgba(255,255,255,0.92);
+  }
+
+  .cover-center {
+    position: absolute;
+    top: 700px; left: 0; right: 0;
+    text-align: center;
+  }
+  .cover-hero {
+    font-family: 'TT Nooks Script Edu', 'Caveat', cursive;
+    font-weight: 700;
+    font-size: 440px;
+    line-height: 0.9;
+    text-align: center;
+    text-shadow: 0 8px 60px rgba(0,0,0,0.45), 0 0 80px rgba(229,55,118,0.25);
+  }
+  .cover-pill {
+    margin-top: 30px;
+  }
+  .cover-pill .pill {
+    font-size: 44px;
+    padding: 22px 50px;
+  }
+  .cover-subtitle {
+    font-size: 44px;
+    margin-top: 30px;
+    color: rgba(255,255,255,0.78);
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="bg-dark"></div>
+    <div class="heart"></div>
+
+    <!-- Динамические места выгребает PIL поверх pre-baked PNG.
+         Здесь только статичные элементы дизайна. -->
+    <div class="cover-top">
+      <div class="h-bold">TELEGRAM RECAP<br>&nbsp;</div>
+      <div class="years">&nbsp;</div>
+    </div>
+
+    <div class="cover-center">
+      <div class="cover-hero">&nbsp;</div>
+      <div class="cover-pill"><span class="pill pill-white">ПОСТОВ ЗА ВСЕ ВРЕМЯ</span></div>
+      <div class="cover-subtitle">&nbsp;</div>
+    </div>
+
+    <div class="brand-logo">INSIGHT</div>
+    <div class="branding"><span class="pill">@insight_tg_bot</span></div>
+  </div>
+</body>
+</html>

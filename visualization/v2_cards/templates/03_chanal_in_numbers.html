@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Channel in numbers</title>
+<link rel="stylesheet" href="_base.css">
+<style>
+  .top-title {
+    position: absolute;
+    top: 173px; left: 0; width: 1080px;
+    text-align: center;
+    font-family: 'TT Nooks Script Edu', serif;
+    font-weight: 700;
+    font-size: 110px;
+    line-height: 1.0;
+  }
+  .subtitle-static {
+    position: absolute;
+    top: 435px; left: 0; width: 1080px;
+    text-align: center;
+    font-family: 'Inter', sans-serif;
+    font-weight: 400;
+    font-size: 50px;
+    color: rgba(255,255,255,0.78);
+  }
+  /* Сердце-силуэт ярче — как в макетах с pill'ами */
+  .heart-big {
+    position: absolute;
+    left: 50%; top: 720px;
+    transform: translateX(-50%);
+    width: 980px; height: 900px;
+    pointer-events: none;
+  }
+  .heart-big::before {
+    content: '';
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(ellipse 70% 50% at 50% 35%, rgba(255,150,200,0.40) 0%, rgba(255,150,200,0) 65%),
+      radial-gradient(ellipse 40% 35% at 30% 60%, rgba(220,80,150,0.30) 0%, rgba(220,80,150,0) 60%),
+      radial-gradient(ellipse 40% 35% at 70% 60%, rgba(220,80,150,0.30) 0%, rgba(220,80,150,0) 60%);
+    filter: blur(2px);
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="bg-dark"></div>
+    <div class="heart-big"></div>
+    <!-- Заголовок «новый положняк» сюда не пишем — это динамическое название канала, рисует PIL -->
+    <!-- Здесь только подзаголовок «в цифрах» который статический -->
+    <div class="subtitle-static">в цифрах</div>
+    <!-- pill-факты рисуются PIL'ом -->
+    <div class="brand-logo">INSIGHT</div>
+    <div class="branding"><span class="pill">@insight_tg_bot</span></div>
+  </div>
+</body>
+</html>

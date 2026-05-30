@@ -169,7 +169,7 @@ def test_prices_fixed():
     prices_a = get_prices(100)
     prices_b = get_prices(101)
     assert prices_a == prices_b
-    assert prices_a == {'pack_1': 50, 'pack_3': 100, 'pack_10': 250}
+    assert prices_a == {'pack_1': 50, 'pack_3': 100}
 
 
 # --- common: format_wait_time ---

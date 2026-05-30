@@ -33,7 +33,7 @@ class ClientAccount:
     """Аккаунт Telegram с метаданными."""
     name: str
     client: TelegramClient
-    semaphore: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
+    semaphore: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(2))
     cooldown_until: float = 0.0  # Unix timestamp когда закончится FloodWait
     total_requests: int = 0
     failed_requests: int = 0
@@ -262,7 +262,7 @@ class ClientPool:
                                 lite_mode=lite_mode,
                                 enable_llm=enable_llm,
                             ),
-                            timeout=180,
+                            timeout=300,
                         )
 
                         if result and result.cloud_path:

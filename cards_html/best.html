@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @font-face {
+    font-family: 'Inter';
+    src: url('file:///Users/kristina/kris_/bot_tg_v2/assets/fonts/Inter-Variable.ttf');
+    font-weight: 100 900; font-style: normal;
+  }
+  @font-face {
+    font-family: 'Inter';
+    src: url('file:///Users/kristina/kris_/bot_tg_v2/assets/fonts/Inter-Italic-Variable.ttf');
+    font-weight: 100 900; font-style: italic;
+  }
+  @font-face {
+    font-family: 'NooksScript';
+    src: url('file:///Users/kristina/kris_/bot_tg_v2/assets/fonts/TT Nooks Script Educational Bold.otf');
+    font-weight: 700; font-style: normal;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1080px; height: 1920px; }
+  body {
+    position: relative;
+    background-image: url('file:///Users/kristina/kris_/bot_tg_v2/new_bg/1306010585.png');
+    background-size: 1080px 1920px;
+    font-family: 'Inter', sans-serif;
+    color: #fff;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* каждый слот — абсолютный бокс по координатам Figma (left/top/width = x/y/w),
+     текст центрируется внутри бокса (в Figma все align=CENTER) */
+  .slot { position: absolute; text-align: center; white-space: pre; }
+
+  /* заголовок: Telegram Recap \n новый положняк */
+  .title  { left: 75px;  top: 199px;  width: 950px;
+            font-weight: 700; font-size: 100px; line-height: 110px;
+            letter-spacing: -4px; color: #ffffff; text-transform: uppercase; }
+
+  /* период (курсив) */
+  .period { left: 166px; top: 538px;  width: 748px;
+            font-weight: 400; font-size: 80px;  line-height: 104px;
+            font-style: italic; color: #ffffff; }
+
+  /* большое число (рукописный Nooks) */
+  .big    { left: 55px;  top: 582px;  width: 970px; height: 639px;
+            display: flex; align-items: center; justify-content: center;
+            font-family: 'NooksScript'; font-weight: 700;
+            font-size: 450px; line-height: 639px;
+            letter-spacing: -18px; color: #fff7ff; }
+
+  /* темп постинга */
+  .rate   { left: 3px;   top: 1352px; width: 1077px;
+            font-weight: 500; font-size: 50px; line-height: 66px;
+            letter-spacing: -3.67px; color: #fbfbfb; }
+</style>
+</head>
+<body>
+  <div class="slot title">Telegram Recap
+новый
+положняк</div>
+  <div class="slot period">2017-2026</div>
+  <div class="slot big">18,5К</div>
+  <div class="slot rate">по ~5 в день · каждый день</div>
+</body>
+</html>

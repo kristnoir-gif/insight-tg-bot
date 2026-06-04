@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @font-face {
+    font-family: 'Inter';
+    src: url('file:///Users/kristina/kris_/bot_tg_v2/assets/fonts/Inter-Variable.ttf');
+    font-weight: 100 900; font-style: normal;
+  }
+  @font-face {
+    font-family: 'Inter';
+    src: url('file:///Users/kristina/kris_/bot_tg_v2/assets/fonts/Inter-Italic-Variable.ttf');
+    font-weight: 100 900; font-style: italic;
+  }
+  @font-face {
+    font-family: 'Nooks';
+    src: url('file:///Users/kristina/kris_/bot_tg_v2/assets/fonts/TT Nooks Script Educational Regular.otf');
+    font-weight: 400; font-style: normal;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1080px; height: 1920px; }
+  body {
+    position: relative;
+    background-image: url('file:///Users/kristina/kris_/bot_tg_v2/assets/figma/variants_clean/11_geography.png');
+    background-size: 1080px 1920px;
+    font-family: 'Inter', sans-serif;
+    color: #fff;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* подзаголовок под впечатанным заголовком ГЕОГРАФИЯ */
+  .subtitle {
+    position: absolute; top: 315px; left: 0; width: 1080px;
+    text-align: center;
+    font-size: 44px; font-weight: 400; color: #e8e8ec;
+  }
+
+  /* блок городов: каждая строка — текст "город – число" по центру,
+     подчёркивание = ширине текста (inline-block + border-bottom) */
+  .cities {
+    position: absolute; top: 440px; left: 0; width: 1080px;
+    display: flex; flex-direction: column; align-items: center;
+  }
+  .row { font-size: 140px; font-weight: 500; line-height: 1.07; }
+  .row .line {
+    display: inline-block; white-space: nowrap;
+    border-bottom: 4px solid rgba(255,255,255,0.5); padding-bottom: 2px;
+  }
+  .row.italic .city { font-style: italic; }
+  .row .num { font-family: 'Nooks'; font-weight: 400; }
+
+  .heart {
+    position: absolute; top: 1430px; left: 0; width: 1080px;
+    text-align: center;
+    font-size: 42px; font-style: italic; color: #e0e0e6;
+  }
+</style>
+</head>
+<body>
+  <div class="subtitle">195 упоминаний городов</div>
+
+  <div class="cities">
+    <div class="row"><span class="line"><span class="city">тбилиси</span> – <span class="num">66</span></span></div>
+    <div class="row"><span class="line"><span class="city">петербург</span> – <span class="num">65</span></span></div>
+    <div class="row italic"><span class="line"><span class="city">москва</span> – <span class="num">34</span></span></div>
+    <div class="row"><span class="line"><span class="city">берлин</span> – <span class="num">2</span></span></div>
+    <div class="row italic"><span class="line"><span class="city">стамбул</span> – <span class="num">2</span></span></div>
+    <div class="row"><span class="line"><span class="city">ереван</span> – <span class="num">1</span></span></div>
+  </div>
+
+  <div class="heart">сердце канала — Тбилиси</div>
+</body>
+</html>

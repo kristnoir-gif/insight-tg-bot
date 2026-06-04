@@ -92,3 +92,9 @@ docs/
 scripts/
 backups/
 generate_cache.py
+
+# v2-карточки: артефакты рендера и кэши
+cards_html/out/
+cards_html/emoji_cache/
+new_bg/*.orig
+fonts/

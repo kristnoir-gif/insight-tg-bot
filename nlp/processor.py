@@ -127,6 +127,18 @@ def extract_person_names(text: str) -> list[str]:
             if last_name:
                 name_parts.append(last_name.capitalize())
 
+            # Однословное «имя» — доппроверка pymorphy: слово должно иметь
+            # разбор с граммемой Name/Surn/Patr (отсев ложных PER типа «Музыку»),
+            # + нормализация в именительный («Навального» → «Навальный»)
+            if len(name_parts) == 1:
+                name_parses = [
+                    p for p in morph.parse(name_parts[0])
+                    if {'Name', 'Surn', 'Patr'} & set(str(p.tag).replace(',', ' ').split())
+                ]
+                if not name_parses:
+                    continue
+                name_parts = [name_parses[0].normal_form.capitalize()]
+
             name = ' '.join(name_parts)
 
             # Пропускаем слишком короткие

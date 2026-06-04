@@ -104,6 +104,10 @@ class V2CardData:
 
     # 08 post_by_days_weeks
     favorite_weekday: int = 0      # 0=пн ... 6=вс
+    posts_by_weekday: dict = field(default_factory=dict)  # {0..6: count}
+
+    # 12 top_phrases (любимые фразы — строки)
+    top_phrases: list[str] = field(default_factory=list)
 
     # 10 archetype_bad
     mat_percent_of_text: float = 0.0
@@ -133,7 +137,8 @@ class V2CardData:
     # 16 reading_stats
     reading_time_hours: float = 0.0
     coffee_cups: int = 0
-    sitcom_seasons: float = 0.0
+    sitcom_seasons: float = 0.0   # legacy, в карточке заменено на book_pages
+    book_pages: int = 0           # «это как N страниц книжного текста» (~1800 зн/стр)
 
     # 17 most_used_word
     top_word: str = ""
@@ -146,6 +151,10 @@ class V2CardData:
 
     # 18 top_person
     top_names_with_counts: list[tuple[str, int]] = field(default_factory=list)
+
+    # 20 англицизмы (% от всех слов + топ-3 использованных)
+    anglicism_percent: float = 0.0
+    top_anglicisms: list[tuple[str, int]] = field(default_factory=list)
 
 
 def _classify_vocab(unique_count: int) -> str:
@@ -217,9 +226,10 @@ def _max_consecutive_days(dates: list[datetime]) -> int:
 
 
 # Скорость чтения и метафоры для карточки 16
-_CHARS_PER_MINUTE = 1000          # ≈ 200 wpm, кириллица
+_WORDS_PER_MINUTE = 150           # вдумчивое чтение, кириллица
 _MINUTES_PER_COFFEE = 45          # одна чашка кофе ≈ 45 мин чтения
 _MINUTES_PER_SITCOM_SEASON = 20 * 22  # 22 серии × 20 мин
+_CHARS_PER_BOOK_PAGE = 1800       # стандартная книжная страница
 
 
 def build_v2_card_data(
@@ -236,6 +246,7 @@ def build_v2_card_data(
     total_photos: int = 0,
     total_reactions: int = 0,
     top_posts: list[dict] | None = None,
+    top_phrases: list[tuple[tuple[str, ...], int]] | None = None,
 ) -> V2CardData:
     """Вычисляет V2CardData из агрегатов, уже собранных в `_run_analysis_pipeline`.
 
@@ -251,7 +262,7 @@ def build_v2_card_data(
     start = min(dates).astimezone(MOSCOW_TZ)
     end = max(dates).astimezone(MOSCOW_TZ)
     span_days = max((end - start).days + 1, 1)
-    years_covered = max(end.year - start.year + 1, 1)
+    years_covered = max(round(span_days / 365), 1)  # длительность, а не кол-во календарных лет
     posts_per_day = len(posts) / span_days
 
     # mat %
@@ -287,12 +298,24 @@ def build_v2_card_data(
     palette = _classify_emotion_palette(top_emojis)
 
     # Чтение
-    minutes_to_read = total_chars / _CHARS_PER_MINUTE if total_chars else 0
+    minutes_to_read = total_words / _WORDS_PER_MINUTE if total_words else 0
     reading_hours = round(minutes_to_read / 60, 1)
     coffee = int(round(minutes_to_read / _MINUTES_PER_COFFEE))
     sitcom = round(minutes_to_read / _MINUTES_PER_SITCOM_SEASON, 1)
+    book_pages = max(int(round(total_chars / _CHARS_PER_BOOK_PAGE)), 1)
 
     avg_reactions = (total_reactions / len(posts)) if (total_reactions and posts) else 0.0
+
+    # Англицизмы: совпадения по словарю (леммы) + латиница из сырого текста.
+    import re as _re
+    from nlp.anglicisms import ANGLICISMS
+    angl_lemmas = [w for w in all_words if w in ANGLICISMS]
+    latin = []
+    for _, text in posts:
+        latin.extend(m.lower() for m in _re.findall(r"[A-Za-z]{2,}", text or ""))
+    angl_all = angl_lemmas + latin
+    anglicism_pct = round(len(angl_all) / total_words * 100, 1) if total_words else 0.0
+    top_angl = Counter(angl_all).most_common(40)  # топ-3 для % карточки, всё — для облака
 
     return V2CardData(
         total_posts=len(posts),
@@ -315,6 +338,8 @@ def build_v2_card_data(
         peak_bucket_share=round(peak_share, 0),
 
         favorite_weekday=fav_wd,
+        posts_by_weekday={int(d): int(c) for d, c in (weekday_counts or {}).items()},
+        top_phrases=[" ".join(p) for p, _ in (top_phrases or [])[:6]],
 
         mat_percent_of_text=round(mat_pct, 1),
         posts_with_mat_percent=round(pwm_pct, 1),
@@ -334,6 +359,7 @@ def build_v2_card_data(
         reading_time_hours=reading_hours,
         coffee_cups=coffee,
         sitcom_seasons=sitcom,
+        book_pages=book_pages,
 
         top_word=top_w,
         top_word_count=top_w_cnt,
@@ -343,6 +369,9 @@ def build_v2_card_data(
         ),
 
         top_names_with_counts=names_counter.most_common(6) if names_counter else [],
+
+        anglicism_percent=anglicism_pct,
+        top_anglicisms=top_angl,
     )
 
 
@@ -1131,6 +1160,7 @@ async def _run_analysis_pipeline(
         total_photos=total_photos,
         total_reactions=total_reactions,
         top_posts=top_posts,
+        top_phrases=top_phrases,
     )
 
     # LLM-обогащение v2 (one_phrase + jungian архетип)
